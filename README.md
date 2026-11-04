@@ -22,7 +22,7 @@ Lunalyr sits in the notification area, follows the song that is playing in any a
 
 ## Install
 
-Download the installer from a CI run's artifacts (`lunalyr-windows-<commit>` → `Lunalyr_<version>_x64-setup.exe`) and run it. It installs per user (no administrator rights) and uses the Microsoft Edge WebView2 runtime, which Windows 10/11 normally already has; the installer fetches it if not. The app is not code-signed yet, so SmartScreen may ask you to confirm.
+Download `Lunalyr_0.1.0_x64-setup.exe` from the [latest preview release](https://github.com/WaterBotol/Lunalyr-Windows/releases/tag/v0.1.0-preview.1) and run it (each CI run's artifacts also contain a fresh build). It installs per user (no administrator rights) and uses the Microsoft Edge WebView2 runtime, which Windows 10/11 normally already has; the installer fetches it if not. The app is not code-signed yet, so SmartScreen may ask you to confirm.
 
 ## Develop
 
