@@ -133,6 +133,11 @@ pub fn set_launch_at_login(_enabled: bool) -> PlatformResult<()> {
     Ok(())
 }
 
+/// Unknown on development hosts: the persisted setting is kept.
+pub fn launch_at_login_state() -> Option<bool> {
+    None
+}
+
 /// Japanese readings need the Windows phonetic analyser; none here.
 pub fn japanese_readings(_text: &str) -> Option<Vec<(String, String)>> {
     None

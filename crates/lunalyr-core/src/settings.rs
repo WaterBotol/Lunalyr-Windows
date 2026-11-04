@@ -216,7 +216,9 @@ impl Default for Settings {
             font: FontChoice::Manrope,
             background: BackgroundMode::Colour,
             visualizer: VisualizerStyle::Wavefield,
-            audio_reactive: false,
+            // Windows needs no capture permission; capture still only runs
+            // while the visualiser background is selected.
+            audio_reactive: true,
             audio_sensitivity: 1.0,
             readings: ReadingDisplay::Off,
             tone_marks: true,

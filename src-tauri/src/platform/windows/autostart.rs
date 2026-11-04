@@ -7,7 +7,9 @@ use std::ffi::c_void;
 
 use ::windows::core::w;
 use ::windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
-use ::windows::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+use ::windows::Win32::System::Registry::{
+    RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ,
+};
 
 use crate::platform::{PlatformError, PlatformResult};
 
@@ -58,6 +60,50 @@ pub fn set_launch_at_login(enabled: bool) -> PlatformResult<()> {
         log::info!("autostart: disabled");
     }
     Ok(())
+}
+
+/// Whether Windows will start Lunalyr at login: the Run value exists and the
+/// "Startup apps" flag (Settings / Task Manager) does not disable it. None if
+/// the registry cannot be read.
+pub fn launch_at_login_state() -> Option<bool> {
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            w!("Lunalyr"),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Some(false);
+    }
+    if status != ERROR_SUCCESS {
+        log::debug!("autostart: could not read the Run key: {}", describe(status));
+        return None;
+    }
+    // StartupApproved\Run: 12 bytes; an odd first byte means disabled
+    // (02/06 enabled, 03/07 disabled). Absent means enabled.
+    let mut flags = [0u8; 12];
+    let mut length = flags.len() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run"),
+            w!("Lunalyr"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(flags.as_mut_ptr() as *mut c_void),
+            Some(&mut length),
+        )
+    };
+    if status == ERROR_SUCCESS && length >= 1 {
+        return Some(flags[0] & 1 == 0);
+    }
+    Some(true)
 }
 
 fn check(status: WIN32_ERROR, what: &str) -> PlatformResult<()> {

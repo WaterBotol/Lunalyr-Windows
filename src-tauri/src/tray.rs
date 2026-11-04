@@ -58,7 +58,8 @@ impl Tray {
         } else {
             now_playing.to_string()
         };
-        let _ = self.now_playing.set_text(&label);
+        // '&' marks a mnemonic in Windows menus; tabs split the text.
+        let _ = self.now_playing.set_text(label.replace('&', "&&").replace('\t', " "));
         let _ = self.pause.set_checked(paused);
         let _ = self.icon.set_tooltip(Some(format!("Lunalyr — {label}")));
     }

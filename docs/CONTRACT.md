@@ -21,6 +21,14 @@ instants are **Unix epoch milliseconds** (compare with `Date.now()`).
 * `demo.html` — browser-only harness (no Tauri) used to develop and verify the
   renderer on any OS. It feeds the same contract objects from sample data.
 
+## Listening
+
+Pages must listen **as their own window** — `listen(event, handler, { target: { kind: "WebviewWindow", label } })`
+or `getCurrentWebviewWindow().listen(...)` — never with a plain `listen()`. Tauri delivers every event to
+"Any"-target listeners, including events sent with `emit_to` to another window, so a plain listener in one
+wallpaper would obey another monitor's `lunalyr://render`. Window-scoped listeners still receive app-wide
+broadcasts. (`ui/src/bridge.ts` does this.)
+
 ## Startup
 
 A page calls `get_snapshot` on load, then listens to events. Every event
@@ -35,7 +43,7 @@ is repaired by the next one.
 | `lunalyr://lyrics` | `LyricsView` | lookup started / finished / readings changed |
 | `lunalyr://clock` | `PlaybackClock` | GSMTC timeline/playback change, offset change, periodic re-sync (≤ 5 s) |
 | `lunalyr://settings` | `Settings` | any settings change |
-| `lunalyr://render` | `RenderState` | per wallpaper window (`emit_to`): covered / user pause / session lock |
+| `lunalyr://render` | `RenderState` | per window (`emit_to`): covered / user pause / session lock / displays off; the settings window gets it too (user pause) |
 | `lunalyr://lookup` | `LookupInfo` | candidates and per-source states (settings window) |
 | `lunalyr://audio` | `AudioFrame` | ~30–60 Hz, only while the visualiser background is on |
 

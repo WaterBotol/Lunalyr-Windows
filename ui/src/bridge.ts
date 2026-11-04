@@ -30,12 +30,24 @@ export function insideTauri(): boolean {
 }
 
 async function tauriBridge(): Promise<Bridge> {
-  const [core, events] = await Promise.all([import("@tauri-apps/api/core"), import("@tauri-apps/api/event")]);
+  const [core, events, windows] = await Promise.all([
+    import("@tauri-apps/api/core"),
+    import("@tauri-apps/api/event"),
+    import("@tauri-apps/api/webviewWindow"),
+  ]);
+  // Listen as THIS window. A plain `listen()` registers an "Any" target, and
+  // Tauri delivers every event to Any listeners, including `emit_to` aimed
+  // at another window (one monitor's pause would pause them all) and the
+  // wallpaper-only audio frames. Window-scoped listeners still receive
+  // app-wide `emit` broadcasts.
+  const label = windows.getCurrentWebviewWindow().label;
   return {
     kind: "tauri",
     invoke: <T>(command: string, args?: Record<string, unknown>) => core.invoke<T>(command, args),
     listen: async (event, handler) => {
-      const unlisten = await events.listen(event, (message) => handler(message.payload as never));
+      const unlisten = await events.listen(event, (message) => handler(message.payload as never), {
+        target: { kind: "WebviewWindow", label },
+      });
       return unlisten;
     },
   };

@@ -24,6 +24,7 @@
 //! }
 //! fn start_audio(sink: EventSink) -> PlatformResult<AudioHandle>;  // M2
 //! fn set_launch_at_login(enabled: bool) -> PlatformResult<()>;
+//! fn launch_at_login_state() -> Option<bool>;  // None: unknown
 //! fn japanese_readings(text: &str) -> Option<Vec<(String, String)>>;  // M2
 //! ```
 
@@ -101,6 +102,8 @@ pub enum DesktopEvent {
     Coverage(Vec<(String, bool)>),
     /// Workstation locked (true) / unlocked (false). Pause while locked.
     SessionLocked(bool),
+    /// Every display of this session is off (true) or on again (false).
+    DisplaysAsleep(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]

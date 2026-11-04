@@ -16,7 +16,7 @@ mod util;
 mod wallpaper;
 
 pub use audio::start_audio;
-pub use autostart::set_launch_at_login;
+pub use autostart::{launch_at_login_state, set_launch_at_login};
 pub use desktop::start_desktop_watcher;
 pub use japanese::japanese_readings;
 pub use media::start_media;

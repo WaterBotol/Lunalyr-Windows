@@ -39,11 +39,23 @@ pub struct AppState {
     audio: Mutex<Option<AudioHandle>>,
     tray: Mutex<Option<tray::Tray>>,
     sink: EventSink,
+    /// A queued wallpaper rebuild (`Some(recreate)`); requests coalesce.
+    rebuild_pending: Mutex<Option<bool>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic elsewhere must not take the whole app down with poisoned locks.
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Like [`lock`] but gives up instead of waiting (used by periodic checks so
+/// they can never re-enter a long main-thread operation holding the lock).
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 fn state(app: &AppHandle) -> Arc<AppState> {
@@ -97,20 +109,16 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
                     run_effects(&app, effects);
                 });
             }
-            Effect::Pin { query, result } => {
-                if !shared.lyrics.pin(&query, &result) {
-                    log::warn!("could not save the lyric choice for this recording");
-                }
-            }
             Effect::Unpin { query } => shared.lyrics.unpin(&query),
             Effect::ExtractPalette { generation, bytes } => {
                 let app = app.clone();
                 let shared = shared.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    if let Some(palette) = shared.lyrics.palette(&bytes) {
-                        let effects = lock(&shared.controller).on_palette(generation, palette);
-                        run_effects(&app, effects);
-                    }
+                    // Undecodable artwork gives the fallback palette, not the
+                    // previous song's colours.
+                    let palette = shared.lyrics.palette(&bytes);
+                    let effects = lock(&shared.controller).on_palette(generation, palette);
+                    run_effects(&app, effects);
                 });
             }
             Effect::ComputeReadings { generation, lines } => {
@@ -136,6 +144,11 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
             Effect::SetLaunchAtLogin(enabled) => {
                 if let Err(error) = platform::set_launch_at_login(enabled) {
                     log::error!("launch at login: {error}");
+                    // Show what is really configured, as macOS reverts the toggle.
+                    let actual = platform::launch_at_login_state().unwrap_or(!enabled);
+                    let effects = lock(&shared.controller)
+                        .launch_at_login_failed(actual, format!("Launch at login could not be changed: {error}"));
+                    run_effects(app, effects);
                 }
             }
             Effect::SetAudio(enabled) => {
@@ -164,22 +177,55 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
     }
 }
 
-/// Rebuilds wallpaper windows on the main thread, then tells the controller.
-fn schedule_rebuild(app: &AppHandle, recreate: bool) {
-    let handle = app.clone();
-    let result = app.run_on_main_thread(move || {
-        let shared = state(&handle);
-        let selection = lock(&shared.controller).settings().displays;
-        let windows = lock(&shared.wallpapers).rebuild(&handle, selection, recreate);
-        let effects = lock(&shared.controller).set_windows(windows);
-        run_effects(&handle, effects);
+/// Queues `task` on the event loop and never runs it inline.
+///
+/// `run_on_main_thread` runs its closure immediately when called on the main
+/// thread, and synchronous commands run on the main thread inside a WebView2
+/// callback: creating a webview there deadlocks (WebView2 cannot complete
+/// its creation while one of its own handlers is on the stack). Posting from
+/// another thread always goes through tao's event loop instead.
+fn defer_to_main(app: &AppHandle, what: &'static str, task: impl FnOnce(&AppHandle) + Send + 'static) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("lunalyr-defer".into()).spawn(move || {
+        let handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || task(&handle)) {
+            log::error!("could not schedule {what}: {error}");
+        }
     });
-    if let Err(error) = result {
-        log::error!("could not schedule wallpaper rebuild: {error}");
+    if let Err(error) = spawned {
+        log::error!("could not schedule {what}: {error}");
     }
 }
 
+/// Rebuilds wallpaper windows on the main thread, then tells the controller.
+/// Requests made while one is queued are merged (`recreate` wins).
+fn schedule_rebuild(app: &AppHandle, recreate: bool) {
+    let shared = state(app);
+    {
+        let mut pending = lock(&shared.rebuild_pending);
+        if let Some(queued) = pending.as_mut() {
+            *queued |= recreate;
+            return;
+        }
+        *pending = Some(recreate);
+    }
+    defer_to_main(app, "wallpaper rebuild", |handle| {
+        let shared = state(handle);
+        let Some(recreate) = lock(&shared.rebuild_pending).take() else { return };
+        let selection = lock(&shared.controller).settings().displays;
+        let windows = lock(&shared.wallpapers).rebuild(handle, selection, recreate);
+        let effects = lock(&shared.controller).set_windows(windows);
+        run_effects(handle, effects);
+    });
+}
+
+/// Shows (or creates) the settings window. Always deferred: see
+/// [`defer_to_main`].
 pub(crate) fn show_settings(app: &AppHandle) {
+    defer_to_main(app, "the settings window", show_settings_now);
+}
+
+fn show_settings_now(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -271,9 +317,9 @@ fn import_lyrics(app: AppHandle, state: State<'_, Arc<AppState>>, text: String) 
     }
     let duration = lock(&state.controller).query().map(|q| q.duration).unwrap_or(0.0);
     let parsed = state.lyrics.parse_import(&text, duration);
-    let effects = lock(&state.controller).import_lyrics(parsed, state.lyrics.as_ref(), now_ms())?;
+    let (message, effects) = lock(&state.controller).import_lyrics(parsed, state.lyrics.as_ref(), now_ms())?;
     run_effects(&app, effects);
-    Ok("Imported lyrics saved for this recording.".into())
+    Ok(message)
 }
 
 #[tauri::command]
@@ -318,8 +364,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let cache_dir = app.path().app_cache_dir()?.join("lyrics");
     let settings_path = config_dir.join("settings.json");
     let first_run = !settings_path.exists();
-    let settings = Settings::load(&settings_path);
+    let mut settings = Settings::load(&settings_path);
     log::info!("Lunalyr {} starting (settings: {})", app.package_info().version, settings_path.display());
+    // The Run key is the truth for launch at login (the user may have changed
+    // it in Task Manager's Startup apps).
+    if let Some(actual) = platform::launch_at_login_state() {
+        if actual != settings.launch_at_login {
+            log::info!("launch at login is {} in Windows; updating the setting", if actual { "on" } else { "off" });
+            settings.launch_at_login = actual;
+            let _ = settings.save(&settings_path);
+        }
+    }
 
     let (sink, mut events) = tokio::sync::mpsc::unbounded_channel::<PlatformEvent>();
     let shared = Arc::new(AppState {
@@ -330,6 +385,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         audio: Mutex::new(None),
         tray: Mutex::new(None),
         sink: sink.clone(),
+        rebuild_pending: Mutex::new(None),
     });
     app.manage(shared.clone());
     if first_run {
@@ -379,9 +435,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let app = watchdog.clone();
         let _ = watchdog.run_on_main_thread(move || {
             let shared = state(&app);
-            let health = lock(&shared.wallpapers).verify();
+            // Skip this tick if a rebuild holds the lock (never wait for it).
+            let Some(mut wallpapers) = try_lock(&shared.wallpapers) else { return };
+            let health = wallpapers.verify();
+            drop(wallpapers);
             match health {
-                wallpapers::Health::Fine => {}
+                wallpapers::Health::Fine | wallpapers::Health::Unavailable => {}
                 wallpapers::Health::Repaired => {
                     // Re-send render state: a re-attached webview may have reloaded.
                     let windows = lock(&shared.controller).windows().to_vec();

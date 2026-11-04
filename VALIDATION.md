@@ -1,23 +1,53 @@
 # Validation
 
-What has been verified, how, and what still needs a Windows machine or a CI run. Updated with each milestone.
+What has been verified, how, and what still needs a real Windows machine. There is no Windows machine in the development setup: everything Windows-specific was either type-checked from macOS or run on GitHub Actions `windows-latest`.
 
-_Status: in progress — filled in as checks complete._
+## Verified on GitHub Actions `windows-latest`
 
-## Verified on the development Mac (no Windows available)
+The runner is **Windows Server 2025 Datacenter, build 26100** — the Windows 11 24H2 code base with the new "raised desktop" layout (Progman has `WS_EX_NOREDIRECTIONBITMAP`; `SHELLDLL_DefView` is a layered child of Progman). It has an interactive 1024×768 desktop and no audio device. Workflow: [`.github/workflows/windows.yml`](.github/workflows/windows.yml); smoke test: [`scripts/ci-smoke.ps1`](scripts/ci-smoke.ps1). Each run uploads the installer and a `smoke-<commit>` artifact (OS build, desktop window tree, two screenshots, the app log).
+
+| Check | Evidence (CI run on `main`) |
+|---|---|
+| Rust unit/integration tests on Windows (lyric core, controller, platform helpers, DSP) | `cargo test --workspace --locked` passes |
+| Renderer unit tests and typecheck on Windows | `npm test`, `npm run typecheck` pass |
+| Clippy on Windows | `cargo clippy --workspace --all-targets` passes |
+| App and NSIS installer build | `npm run tauri build -- --bundles nsis` produces `Lunalyr_0.1.0_x64-setup.exe` |
+| App starts and stays up (release build, `--autostart`) | smoke test: alive after 40 s, no panic in the log |
+| Desktop layout detection on 24H2 | log: `wallpaper: raised (24H2+) desktop (Progman …, DefView …, WorkerW …)` |
+| Wallpaper parented behind the icons, correct z-order and styles | window tree: Progman → `SHELLDLL_DefView`, then `Lunalyr wallpaper` (`WS_CHILD|WS_DISABLED`, ex-style `WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW`, full monitor rect), then Explorer's `WorkerW` last |
+| WebView2 renders inside the reparented layered child | screenshot: the album-colour gradient replaces the runner's blue wallpaper with the desktop icons drawn on top; log: `wallpaper-display1-1 loaded and requested a snapshot` (page loaded, IPC round trip works) |
+| GSMTC now playing | log: `media: following the media session of powershell.exe`, `now playing: "Amazing Grace" by Judy Collins (245 s, powershell.exe)` from a System Media Transport Controls session published by [`scripts/ci-media-session.ps1`](scripts/ci-media-session.ps1) |
+| Lyric lookup from Windows | log: `lyrics for "Amazing Grace" by Judy Collins: Word-by-word · NetEase (24 lines; 6 candidates)` about 3 s after the track appeared |
+| Lyrics drawn on the wallpaper and advancing with the timeline | second screenshot (3 s after the first) shows a lyric word on the wallpaper behind the icons |
+
+Not exercised by CI: the legacy (pre-24H2) WorkerW layout, multiple monitors, mixed DPI, Explorer restarts, full-screen coverage, session lock, WASAPI loopback (no audio device on runners), the Japanese phonetic analyser, autostart, the settings window and the installer's install/uninstall.
+
+## Verified on the development Mac
 
 | Check | Command | Result |
 |---|---|---|
-| Lyric core unit tests | `cargo test -p lunalyr-core` | pending |
-| App controller unit tests | `cargo test -p lunalyr --lib` | pending |
-| Windows target type-check (whole app incl. platform layer) | `cargo check -p lunalyr --target x86_64-pc-windows-msvc` | pending |
-| Renderer unit tests | `npm test` | pending |
-| TypeScript typecheck / production build | `npm run typecheck`, `npm run build` | pending |
-| Renderer visual check | `demo.html` in a browser | pending |
-| Shell smoke run on macOS (stand-in platform) | `cargo run -p lunalyr --features custom-protocol` | pending |
+| Lyric core | `cargo test -p lunalyr-core` | 161 passed (132 unit, 29 integration with fixture HTTP) |
+| Live provider lookups | `cargo test -p lunalyr-core --test live -- --ignored` | 7 passed: NetEase word-by-word, Lyrics+ mixed, LRCLIB/QQ/Kugou/Kuwo line-synced, lyrics.ovh plain (metadata only printed) |
+| App shell, platform helpers, DSP | `cargo test -p lunalyr --lib` | all passed (controller state machine, coverage/timeline/style logic, audio analysis) |
+| Windows target type-check and lint | `cargo clippy -p lunalyr --all-targets --target x86_64-pc-windows-msvc` | clean |
+| Renderer | `npm test` / `npm run typecheck` / `npm run build` | 106 tests passed; clean; built |
+| Motion/timing parity | `ui/src/timing/golden.test.ts` | TypeScript matches vectors generated from the **unmodified macOS C** (`LyricMotion.c`, `ConstellationGeometry.c`) to 1e-11 |
+| Renderer visual check | `demo.html` in a browser | all eight compositions, line-timed, readings (pinyin), plain, notices, Spectrum and Wavefield visualisers, settings window |
+| Shell end to end on macOS (stand-in platform) | `cargo run -p lunalyr --features custom-protocol` with `LUNALYR_DEV_TITLE=…` | track → lookup → `Word-by-word · NetEase (24 lines; 6 candidates)`; wallpaper page loaded and fetched its snapshot |
 
-## Needs Windows (CI or a real machine)
+## Needs a real Windows desktop
 
-| Item | How it will be checked |
-|---|---|
-| | |
+These depend on hardware, user setups or Explorer behaviour that CI cannot reproduce:
+
+1. The legacy WorkerW layout on Windows 10 and Windows 11 23H2 (0x052C split, parenting into the WorkerW behind the icons).
+2. Desktop interaction with the wallpaper attached: icon clicks and drags, right-click menu, rubber-band selection, keyboard focus.
+3. Multiple monitors, negative virtual-screen origins, mixed DPI (a child window reports its parent's DPI, so WebView2's scale may follow the primary monitor), monitor hot-plug and rotation.
+4. Explorer restarts and WorkerW destruction: wallpapers are recreated (`ShellRestarted`) and the 2 s watchdog re-attaches.
+5. Coverage pausing with real apps: maximised windows, exclusive full-screen games, video players, Task View, full-screen Start, presentation mode, the lock screen.
+6. Real players' GSMTC timelines and artwork: Spotify, Apple Music for Windows, Edge/Chrome/Firefox media sessions, pause/seek/resume behaviour and sync accuracy (adjust with the global or per-song offset).
+7. WASAPI loopback with real devices: mix formats, device switching (headphones/Bluetooth), device loss, silence, the Wavefield visualiser's response.
+8. Japanese readings from `JapanesePhoneticAnalyzer` on different Windows editions and display languages.
+9. Launch at login via the Run key (and Task Manager's startup toggle), single-instance behaviour, tray menu.
+10. CPU/GPU and memory cost over hours on laptops and multi-monitor desktops; WebView2 throttling behind the icons (native occlusion calculation is disabled).
+11. Installer: per-user install, WebView2 bootstrapper on machines without the runtime, SmartScreen prompt (the app is unsigned), uninstall.
+12. Installed fonts (Segoe UI Variable, Yu Gothic UI, Microsoft YaHei UI, Malgun Gothic) and CJK/RTL rendering in WebView2.

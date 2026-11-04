@@ -18,6 +18,19 @@ $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 
+# A running Lunalyr (an installed copy started at sign-in, `tauri dev`, or a
+# leftover run) would receive our launch through the single-instance plugin
+# and we would test the wrong process. Stop it and start with an empty log.
+$others = @(Get-Process lunalyr -ErrorAction SilentlyContinue)
+if ($others) {
+    Write-Warning "Stopping running Lunalyr (pid $($others.Id -join ', '))"
+    $others | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
+$logDir = Join-Path $env:LOCALAPPDATA "io.github.waterbotol.lunalyr.windows\logs"
+$log = Join-Path $logDir "lunalyr.log"
+if (Test-Path $log) { Remove-Item $log -Force }
+
 $os = Get-CimInstance Win32_OperatingSystem
 "OS: $($os.Caption) $($os.Version) build $($os.BuildNumber)" | Tee-Object -FilePath "$OutDir/os.txt"
 
@@ -49,6 +62,17 @@ public static class DesktopTree {
     public static bool Close(string title) {
         var h = FindWindow(null, title);
         return h != IntPtr.Zero && PostMessage(h, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
+    }
+    // Closes visible standard dialogs (class #32770), e.g. the runner image's
+    // "System Properties" / "Performance Options" windows. Lunalyr has none.
+    public static int CloseDialogs() {
+        int closed = 0;
+        EnumWindows((h, _) => {
+            var c = new StringBuilder(64); GetClassName(h, c, 64);
+            if (c.ToString() == "#32770" && IsWindowVisible(h) && PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero)) closed++;
+            return true;
+        }, IntPtr.Zero);
+        return closed;
     }
     public static string Dump() {
         var lines = new List<string>();
@@ -97,8 +121,11 @@ Start-Sleep -Seconds 6
 
 [DesktopTree]::Dump() | Tee-Object -FilePath "$OutDir/desktop-tree.txt"
 
-# Runner images sometimes show a "System Properties" paging-file notice.
-[void][DesktopTree]::Close("System Properties")
+# Runner images sometimes show "System Properties" / "Performance Options".
+for ($i = 0; $i -lt 3; $i++) {
+    if ([DesktopTree]::CloseDialogs() -eq 0) { break }
+    Start-Sleep -Milliseconds 700
+}
 Start-Sleep -Seconds 1
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -119,8 +146,6 @@ $alive = -not $app.HasExited
 if ($alive) { Stop-Process -Id $app.Id -Force }
 if ($media -and -not $media.HasExited) { Stop-Process -Id $media.Id -Force }
 
-$logDir = Join-Path $env:LOCALAPPDATA "io.github.waterbotol.lunalyr.windows\logs"
-$log = Join-Path $logDir "lunalyr.log"
 if (Test-Path $log) {
     Copy-Item $log "$OutDir/lunalyr.log"
     Get-Content $log | Select-Object -Last 200

@@ -134,7 +134,7 @@ pub struct RenderState {
     /// Stop the frame loop (covered by a full-screen/maximised window, or
     /// the user paused the wallpaper).
     pub paused: bool,
-    /// Why, for diagnostics: "covered", "user", "session-locked", or "".
+    /// Why, for diagnostics: "covered", "user", "session-locked", "display-off", or "".
     pub reason: String,
 }
 

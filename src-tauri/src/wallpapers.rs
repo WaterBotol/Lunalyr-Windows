@@ -36,6 +36,11 @@ pub struct Wallpapers {
     /// Labels get a fresh suffix whenever a window is created, so a window
     /// that is still being torn down never collides with its replacement.
     created: u64,
+    /// The desktop layer could not be found on the last check (logged once).
+    layer_missing: bool,
+    /// When the last recreate was requested, and the current back-off.
+    last_recreate: Option<std::time::Instant>,
+    backoff: std::time::Duration,
 }
 
 /// Outcome of the periodic attachment check.
@@ -46,6 +51,9 @@ pub enum Health {
     Repaired,
     /// Re-attaching failed (e.g. the window died with Explorer): recreate.
     Broken,
+    /// The desktop layer is missing (Explorer not running or restarting) or
+    /// a recreate happened too recently: keep the windows, check again later.
+    Unavailable,
 }
 
 fn sanitize(id: &str) -> String {
@@ -178,27 +186,42 @@ impl Wallpapers {
     }
 
     /// Re-attaches any window that came loose (Explorer can recreate its
-    /// desktop windows without telling us).
+    /// desktop windows without telling us). Asks for a recreate only when
+    /// the desktop layer exists but our windows cannot be attached to it,
+    /// and then no more often than every 10 s (doubling to 60 s).
     pub fn verify(&mut self) -> Health {
         let Some(host) = self.host.as_mut() else { return Health::Fine };
         let loose: Vec<usize> =
             self.windows.iter().enumerate().filter(|(_, w)| !host.is_attached(w.hwnd)).map(|(i, _)| i).collect();
         if loose.is_empty() {
+            self.layer_missing = false;
+            self.backoff = std::time::Duration::ZERO;
             return Health::Fine;
         }
-        log::warn!("{} wallpaper(s) came loose from the desktop; re-attaching", loose.len());
         if let Err(error) = host.refresh() {
-            log::warn!("desktop layer refresh failed: {error}");
+            if !self.layer_missing {
+                log::warn!("desktop layer unavailable ({error}); wallpapers wait for Explorer");
+                self.layer_missing = true;
+            }
+            return Health::Unavailable;
         }
+        self.layer_missing = false;
+        log::warn!("{} wallpaper(s) came loose from the desktop; re-attaching", loose.len());
         let mut repaired = true;
         for index in loose {
             repaired &= self.attach(index);
         }
         if repaired {
-            Health::Repaired
-        } else {
-            Health::Broken
+            return Health::Repaired;
         }
+        let now = std::time::Instant::now();
+        let due = self.last_recreate.map(|last| now.duration_since(last) >= self.backoff).unwrap_or(true);
+        if !due {
+            return Health::Unavailable;
+        }
+        self.last_recreate = Some(now);
+        self.backoff = (self.backoff * 2).clamp(std::time::Duration::from_secs(10), std::time::Duration::from_secs(60));
+        Health::Broken
     }
 
     /// Detaches and closes every wallpaper before the app exits.

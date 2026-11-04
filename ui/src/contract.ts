@@ -85,7 +85,7 @@ export type LyricsView =
 
 export interface RenderState {
   paused: boolean;
-  /** "covered" | "user" | "session-locked" | "" */
+  /** "covered" | "user" | "session-locked" | "display-off" | "" */
   reason: string;
 }
 

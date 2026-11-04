@@ -54,6 +54,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Devices_FunctionDiscovery",
     "Win32_System_Registry",
+    "Win32_System_Power",
+    "Win32_System_SystemServices",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 # Same versions the `windows` crate already pulls in. `#[implement]` (the

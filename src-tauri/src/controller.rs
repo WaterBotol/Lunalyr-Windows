@@ -45,10 +45,6 @@ pub enum Effect {
         query: LyricQuery,
         force: bool,
     },
-    Pin {
-        query: LyricQuery,
-        result: LyricResult,
-    },
     Unpin {
         query: LyricQuery,
     },
@@ -89,6 +85,9 @@ pub trait LyricOps {
     /// LyricsViewModel.apply processing (QQ gap repair, word-timing validation).
     fn prepare(&self, result: LyricResult, repair_qq_gaps: bool) -> LyricResult;
     fn summary(&self, candidate: &Candidate, chosen: bool) -> CandidateSummary;
+    /// Saves a user-chosen result for this recording; false if it could not
+    /// be written (the UI then says so, as macOS does).
+    fn pin(&self, query: &LyricQuery, result: &LyricResult) -> bool;
 }
 
 pub struct Controller {
@@ -110,6 +109,8 @@ pub struct Controller {
     readings_generation: u64,
     user_paused: bool,
     locked: bool,
+    /// All displays are off (power saving): nothing is visible.
+    displays_asleep: bool,
     coverage: HashMap<String, bool>,
     /// (window label, monitor id)
     windows: Vec<(String, String)>,
@@ -150,6 +151,7 @@ impl Controller {
             readings_generation: 0,
             user_paused: false,
             locked: false,
+            displays_asleep: false,
             coverage: HashMap::new(),
             windows: Vec::new(),
             sent_render: HashMap::new(),
@@ -201,6 +203,8 @@ impl Controller {
             (true, "user")
         } else if self.locked {
             (true, "session-locked")
+        } else if self.displays_asleep {
+            (true, "display-off")
         } else if covered && self.settings.pause_when_covered {
             (true, "covered")
         } else {
@@ -269,12 +273,14 @@ impl Controller {
         effects
     }
 
+    /// Capture only feeds the visualiser background, and only while the
+    /// user allows system audio (macOS: visualiser + audioReactiveEnabled).
     fn wants_audio(&self) -> bool {
-        self.settings.background == BackgroundMode::Visualizer || self.settings.audio_reactive
+        self.settings.background == BackgroundMode::Visualizer && self.settings.audio_reactive
     }
 
     fn audio_effects(&mut self) -> Vec<Effect> {
-        let wanted = self.wants_audio() && !self.user_paused && !self.locked;
+        let wanted = self.wants_audio() && !self.user_paused && !self.locked && !self.displays_asleep;
         if wanted != self.audio_on {
             self.audio_on = wanted;
             vec![Effect::SetAudio(wanted)]
@@ -320,6 +326,12 @@ impl Controller {
                 effects.extend(self.audio_effects());
                 effects
             }
+            PlatformEvent::Desktop(DesktopEvent::DisplaysAsleep(asleep)) => {
+                self.displays_asleep = asleep;
+                let mut effects = self.render_effects();
+                effects.extend(self.audio_effects());
+                effects
+            }
             PlatformEvent::Desktop(DesktopEvent::DisplaysChanged) => {
                 vec![Effect::RebuildWallpapers { recreate: false }]
             }
@@ -347,6 +359,8 @@ impl Controller {
             self.lyrics = LyricsView::Idle;
             self.idle_since = Some(now_ms);
             self.generation += 1;
+            self.artwork_generation += 1;
+            self.palette = fallback_palette();
             return vec![
                 self.emit_track(),
                 self.emit_lyrics(),
@@ -371,9 +385,11 @@ impl Controller {
         self.idle_since = None;
 
         if same {
-            // A late duration (players often report 0 first) refines the
-            // query; retry only if the first lookup found nothing.
-            let duration_arrived = previous.map(|p| p.duration <= 0.0 && info.duration > 0.0).unwrap_or(false);
+            // Same title/artist/album. A late or corrected duration changes the
+            // recording key, under which caches, saved choices and offsets are
+            // stored, so the lookup runs again (macOS handleTrackChange keys by
+            // recording); the current lyrics stay up until it finishes.
+            let key_changed = self.track.as_ref().map(|t| t.recording_key != track.recording_key).unwrap_or(true);
             self.query = Some(query.clone());
             let changed = self.track.as_ref() != Some(&track);
             self.track = Some(track);
@@ -382,8 +398,11 @@ impl Controller {
                 effects.push(self.emit_track());
                 effects.push(self.emit_clock(now_ms));
             }
-            if duration_arrived && matches!(self.lyrics, LyricsView::NotFound { .. }) {
-                effects.extend(self.start_lookup(false));
+            if key_changed {
+                self.candidates.clear();
+                self.lookup = LookupInfo::default();
+                effects.push(self.emit_lookup());
+                effects.extend(self.start_lookup(false, true));
             }
             return effects;
         }
@@ -396,16 +415,28 @@ impl Controller {
         self.candidates.clear();
         self.lookup = LookupInfo::default();
         self.timeline = None;
-        let mut effects = vec![self.emit_track(), self.emit_clock(now_ms), self.tray()];
-        effects.extend(self.start_lookup(false));
+        let mut effects = vec![self.emit_track(), self.emit_lookup(), self.emit_clock(now_ms), self.tray()];
+        effects.extend(self.start_lookup(false, false));
         effects
     }
 
-    fn start_lookup(&mut self, force: bool) -> Vec<Effect> {
+    fn has_content(&self) -> bool {
+        matches!(self.lyrics, LyricsView::Synced { .. } | LyricsView::Plain { .. })
+    }
+
+    /// Starts a lookup. A `refresh` (reload, source change, corrected
+    /// duration) keeps the lyrics on screen until the new result arrives,
+    /// like macOS, which only shows progress when nothing is displayed.
+    fn start_lookup(&mut self, force: bool, refresh: bool) -> Vec<Effect> {
         let Some(query) = self.query.clone() else { return Vec::new() };
         self.generation += 1;
-        self.lyrics = LyricsView::Loading;
-        vec![self.emit_lyrics(), Effect::Lookup { generation: self.generation, query, force }]
+        let mut effects = Vec::new();
+        if (!refresh || !self.has_content()) && self.lyrics != LyricsView::Loading {
+            self.lyrics = LyricsView::Loading;
+            effects.push(self.emit_lyrics());
+        }
+        effects.push(Effect::Lookup { generation: self.generation, query, force });
+        effects
     }
 
     // ---- async completions ------------------------------------------------
@@ -524,7 +555,7 @@ impl Controller {
             a != b
         };
         if sources_changed && self.query.is_some() {
-            effects.extend(self.start_lookup(false));
+            effects.extend(self.start_lookup(false, true));
         } else if (previous.sources.repair_qq_gaps != next.sources.repair_qq_gaps
             || previous.readings != next.readings
             || previous.tone_marks != next.tone_marks)
@@ -536,7 +567,7 @@ impl Controller {
     }
 
     pub fn reload_lyrics(&mut self) -> Vec<Effect> {
-        self.start_lookup(true)
+        self.start_lookup(true, true)
     }
 
     pub fn select_candidate(
@@ -553,13 +584,13 @@ impl Controller {
             .cloned()
             .ok_or("That source has no match for this song.")?;
         self.generation += 1;
-        self.raw = Some(candidate.result.clone());
-        self.lookup.pinned = true;
+        let saved = ops.pin(&query, &candidate.result);
+        self.raw = Some(candidate.result);
+        self.lookup.pinned = saved;
         for summary in &mut self.lookup.candidates {
             summary.chosen = summary.source == source;
         }
-        let mut effects = vec![Effect::Pin { query, result: candidate.result }];
-        effects.extend(self.apply_raw(ops, now_ms));
+        let mut effects = self.apply_raw(ops, now_ms);
         effects.push(self.emit_lookup());
         Ok(effects)
     }
@@ -567,8 +598,10 @@ impl Controller {
     pub fn forget_selection(&mut self) -> Result<Vec<Effect>, String> {
         let query = self.query.clone().ok_or("Nothing is playing.")?;
         self.lookup.pinned = false;
-        let mut effects = vec![Effect::Unpin { query }];
-        effects.extend(self.start_lookup(true));
+        // Unpin first, then show that the choice is gone; the candidates stay
+        // until the new report arrives (macOS forgetSelection).
+        let mut effects = vec![Effect::Unpin { query }, self.emit_lookup()];
+        effects.extend(self.start_lookup(true, true));
         Ok(effects)
     }
 
@@ -579,21 +612,37 @@ impl Controller {
     }
 
     /// `parsed` is the imported file already parsed by lunalyr-core.
+    /// Returns the message for the settings window and the effects.
     pub fn import_lyrics(
         &mut self,
         parsed: Option<LyricResult>,
         ops: &dyn LyricOps,
         now_ms: f64,
-    ) -> Result<Vec<Effect>, String> {
+    ) -> Result<(String, Vec<Effect>), String> {
         let query = self.query.clone().ok_or("Play a song first, then import its lyrics.")?;
         let result = parsed.ok_or("This file has no usable LRC or TTML timestamps.")?;
         self.generation += 1;
-        self.raw = Some(result.clone());
-        self.lookup.pinned = true;
-        let mut effects = vec![Effect::Pin { query, result }];
-        effects.extend(self.apply_raw(ops, now_ms));
+        let saved = ops.pin(&query, &result);
+        self.raw = Some(result);
+        self.lookup.pinned = saved;
+        for summary in &mut self.lookup.candidates {
+            summary.chosen = false;
+        }
+        let mut effects = self.apply_raw(ops, now_ms);
         effects.push(self.emit_lookup());
-        Ok(effects)
+        let message = if saved {
+            "Imported lyrics saved for this recording."
+        } else {
+            "Lyrics imported; the match could not be saved."
+        };
+        Ok((message.to_string(), effects))
+    }
+
+    /// Launch at login could not be changed: show what is really configured.
+    pub fn launch_at_login_failed(&mut self, actual: bool, message: String) -> Vec<Effect> {
+        log::warn!("{message}");
+        self.settings.launch_at_login = actual;
+        vec![self.emit_settings(), Effect::SaveSettings]
     }
 
     pub fn set_user_paused(&mut self, paused: bool) -> Vec<Effect> {
@@ -621,9 +670,24 @@ mod tests {
     use lunalyr_core::model::{Line, Provenance};
 
     struct Ops;
+    struct FailingPins;
+    impl LyricOps for FailingPins {
+        fn prepare(&self, result: LyricResult, _repair: bool) -> LyricResult {
+            result
+        }
+        fn summary(&self, c: &Candidate, chosen: bool) -> CandidateSummary {
+            Ops.summary(c, chosen)
+        }
+        fn pin(&self, _query: &LyricQuery, _result: &LyricResult) -> bool {
+            false
+        }
+    }
     impl LyricOps for Ops {
         fn prepare(&self, result: LyricResult, _repair: bool) -> LyricResult {
             result
+        }
+        fn pin(&self, _query: &LyricQuery, _result: &LyricResult) -> bool {
+            true
         }
         fn summary(&self, c: &Candidate, chosen: bool) -> CandidateSummary {
             CandidateSummary {
@@ -790,7 +854,10 @@ mod tests {
 
     #[test]
     fn user_pause_wins_and_stops_audio() {
-        let mut c = Controller::new(Settings { background: BackgroundMode::Visualizer, ..Settings::default() }, "t");
+        let mut c = Controller::new(
+            Settings { background: BackgroundMode::Visualizer, audio_reactive: true, ..Settings::default() },
+            "t",
+        );
         let start = c.set_windows(vec![("wallpaper-a".into(), "A".into())]);
         assert!(start.contains(&Effect::SetAudio(true)));
         let effects = c.set_user_paused(true);
@@ -830,7 +897,6 @@ mod tests {
         };
         c.on_lookup_finished(1, outcome, &Ops, 0.0);
         let effects = c.select_candidate(SourceId::NetEase, &Ops, 0.0).unwrap();
-        assert!(matches!(&effects[0], Effect::Pin { .. }));
         let lookup = &emitted(&effects, events::LOOKUP)[0];
         assert_eq!(lookup["pinned"], true);
         assert!(c.select_candidate(SourceId::Kuwo, &Ops, 0.0).is_err());
@@ -855,6 +921,97 @@ mod tests {
         assert!(c.on_readings(generation + 1, vec![None]).is_empty());
         let applied = c.on_readings(generation, vec![None]);
         assert_eq!(emitted(&applied, events::LYRICS)[0]["readings"], serde_json::json!([null]));
+    }
+
+    #[test]
+    fn corrected_duration_reruns_the_lookup_but_keeps_lyrics_on_screen() {
+        let mut c = Controller::new(Settings::default(), "test");
+        c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
+        c.on_lookup_finished(1, LookupOutcome { result: Some(synced()), ..Default::default() }, &Ops, 0.0);
+        let effects = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 231.0)))), 1.0);
+        assert_eq!(lookups(&effects), vec![(2, false)], "a new recording key means a new lookup");
+        assert!(emitted(&effects, events::LYRICS).is_empty(), "the current lyrics stay up meanwhile");
+        // Same key (sub-second jitter rounds the same): nothing to do.
+        let again = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 231.2)))), 2.0);
+        assert!(lookups(&again).is_empty());
+    }
+
+    #[test]
+    fn reload_keeps_lyrics_but_a_new_song_shows_loading() {
+        let mut c = Controller::new(Settings::default(), "test");
+        c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
+        c.on_lookup_finished(1, LookupOutcome { result: Some(synced()), ..Default::default() }, &Ops, 0.0);
+        let reload = c.reload_lyrics();
+        assert_eq!(lookups(&reload), vec![(2, true)]);
+        assert!(emitted(&reload, events::LYRICS).is_empty());
+        let next = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Other", 180.0)))), 1.0);
+        assert_eq!(emitted(&next, events::LYRICS)[0]["status"], "loading");
+        assert_eq!(emitted(&next, events::LOOKUP)[0]["candidates"], serde_json::json!([]), "old matches cleared");
+    }
+
+    #[test]
+    fn sleeping_displays_pause_rendering_and_audio() {
+        let mut c = Controller::new(
+            Settings { background: BackgroundMode::Visualizer, audio_reactive: true, ..Settings::default() },
+            "t",
+        );
+        c.set_windows(vec![("wallpaper-a".into(), "A".into())]);
+        let effects = c.on_platform(PlatformEvent::Desktop(DesktopEvent::DisplaysAsleep(true)), 0.0);
+        assert!(effects.contains(&Effect::SetAudio(false)));
+        assert_eq!(c.render_state("wallpaper-a").reason, "display-off");
+        let effects = c.on_platform(PlatformEvent::Desktop(DesktopEvent::DisplaysAsleep(false)), 0.0);
+        assert!(effects.contains(&Effect::SetAudio(true)));
+        assert!(!c.render_state("wallpaper-a").paused);
+    }
+
+    #[test]
+    fn audio_capture_needs_the_visualiser_and_permission() {
+        let mut c = Controller::new(Settings { audio_reactive: true, ..Settings::default() }, "t");
+        assert!(!c.set_windows(vec![]).contains(&Effect::SetAudio(true)), "colour background: no capture");
+        let (_, effects) = c.update_settings(&serde_json::json!({"background": "visualizer"}), &Ops, 0.0).unwrap();
+        assert!(effects.contains(&Effect::SetAudio(true)));
+        let (_, effects) = c.update_settings(&serde_json::json!({"audioReactive": false}), &Ops, 0.0).unwrap();
+        assert!(effects.contains(&Effect::SetAudio(false)));
+    }
+
+    #[test]
+    fn idle_returns_to_the_fallback_palette() {
+        let mut c = Controller::new(Settings::default(), "test");
+        c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
+        let palette = Palette { hsb: vec![[0.5, 0.5, 0.5]; 9], from_artwork: true };
+        c.on_platform(
+            PlatformEvent::Media(MediaEvent::Artwork {
+                title: "Song".into(),
+                artist: "Artist".into(),
+                bytes: Some(vec![1]),
+            }),
+            0.0,
+        );
+        c.on_palette(1, palette);
+        let effects = c.on_platform(PlatformEvent::Media(MediaEvent::Track(None)), 1.0);
+        assert_eq!(emitted(&effects, events::TRACK)[0]["palette"]["fromArtwork"], false);
+        assert!(c.on_palette(1, Palette { hsb: vec![[0.1, 0.1, 0.1]; 9], from_artwork: true }).is_empty(), "stale");
+    }
+
+    #[test]
+    fn failed_saves_are_reported_honestly() {
+        let mut c = Controller::new(Settings::default(), "test");
+        c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
+        let (message, effects) = c.import_lyrics(Some(synced()), &FailingPins, 0.0).unwrap();
+        assert_eq!(message, "Lyrics imported; the match could not be saved.");
+        assert_eq!(emitted(&effects, events::LOOKUP)[0]["pinned"], false);
+        let (message, _) = c.import_lyrics(Some(synced()), &Ops, 0.0).unwrap();
+        assert_eq!(message, "Imported lyrics saved for this recording.");
+    }
+
+    #[test]
+    fn launch_at_login_failure_restores_the_real_state() {
+        let mut c = Controller::new(Settings::default(), "test");
+        let (_, effects) = c.update_settings(&serde_json::json!({"launchAtLogin": true}), &Ops, 0.0).unwrap();
+        assert!(effects.contains(&Effect::SetLaunchAtLogin(true)));
+        let effects = c.launch_at_login_failed(false, "denied".into());
+        assert_eq!(emitted(&effects, events::SETTINGS)[0]["launchAtLogin"], false);
+        assert!(effects.contains(&Effect::SaveSettings));
     }
 
     #[test]

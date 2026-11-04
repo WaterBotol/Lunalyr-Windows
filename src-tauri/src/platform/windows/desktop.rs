@@ -19,15 +19,18 @@ use std::thread;
 use std::time::Duration;
 
 use ::windows::core::{w, BOOL, PCWSTR};
+use ::windows::Win32::Foundation::HANDLE;
 use ::windows::Win32::Foundation::{
     GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, TRUE, WPARAM,
 };
 use ::windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use ::windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use ::windows::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
 use ::windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
+use ::windows::Win32::System::SystemServices::GUID_SESSION_DISPLAY_STATUS;
 use ::windows::Win32::System::Threading::GetCurrentProcessId;
 use ::windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use ::windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
@@ -36,10 +39,11 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetDesktopWindow, GetForegroundWindow, GetLayeredWindowAttributes, GetMessageW, GetShellWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetTimer, TranslateMessage, CHILDID_SELF,
-    EVENT_OBJECT_DESTROY, GWL_EXSTYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, MSG, MSGFLT_ALLOW,
-    OBJID_WINDOW, SPI_SETWORKAREA, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
-    WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
+    DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_OBJECT_DESTROY, GWL_EXSTYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+    LWA_COLORKEY, MSG, MSGFLT_ALLOW, OBJID_WINDOW, PBT_POWERSETTINGCHANGE, SPI_SETWORKAREA, WINEVENT_OUTOFCONTEXT,
+    WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER,
+    WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_LOCK,
+    WTS_SESSION_UNLOCK,
 };
 
 use super::util::{self, hwnd, raw, PerMonitorDpi};
@@ -68,6 +72,8 @@ const SESSION_REGISTRATION_ATTEMPTS: u32 = 300;
 static STARTED: AtomicBool = AtomicBool::new(false);
 static WATCHER: AtomicIsize = AtomicIsize::new(0);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// Last display power state sent: 0 unknown, 1 on, 2 off.
+static DISPLAYS_STATE: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     static SINK: OnceCell<EventSink> = const { OnceCell::new() };
@@ -130,6 +136,16 @@ fn run(sink: EventSink, ready: mpsc::Sender<Result<(), String>>) {
             // UIPI would drop its broadcast otherwise.
             let _ = ChangeWindowMessageFilterEx(window, taskbar_created, MSGFLT_ALLOW, None);
         }
+    }
+
+    // Display power for this session (on / off / dimmed). Windows sends the
+    // current state right after registering. The registration lives as long
+    // as the watcher window (the whole process).
+    match unsafe {
+        RegisterPowerSettingNotification(HANDLE(window.0), &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE)
+    } {
+        Ok(_) => {}
+        Err(error) => log::warn!("desktop: display power notifications unavailable ({error})"),
     }
 
     let explorer_pid = explorer_pid();
@@ -212,6 +228,17 @@ fn create_window() -> Result<HWND, String> {
 }
 
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if message == WM_POWERBROADCAST {
+        if wparam.0 as u32 == PBT_POWERSETTINGCHANGE && lparam.0 != 0 {
+            // SAFETY: for PBT_POWERSETTINGCHANGE, lParam points to a
+            // POWERBROADCAST_SETTING valid for the duration of the call.
+            let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
+            if setting.PowerSetting == GUID_SESSION_DISPLAY_STATUS && setting.DataLength >= 1 {
+                let _ = util::guard(|| display_power(setting.Data[0]));
+            }
+        }
+        return LRESULT(1);
+    }
     match util::guard(|| handle_message(window, message, wparam)) {
         Some(Some(result)) => result,
         _ => DefWindowProcW(window, message, wparam, lparam),
@@ -604,4 +631,15 @@ fn fullscreen_monitor(collect: &Collect) -> Option<usize> {
     }
     let monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
     collect.monitors.iter().position(|handle| *handle == monitor.0 as isize)
+}
+
+/// GUID_SESSION_DISPLAY_STATUS data: 0 = off, 1 = on, 2 = dimmed. Dimmed
+/// counts as on (still visible), as on macOS.
+fn display_power(state: u8) {
+    let next = if state == 0 { 2 } else { 1 };
+    let previous = DISPLAYS_STATE.swap(next, Ordering::SeqCst);
+    if previous != next {
+        log::info!("desktop: displays {}", if next == 2 { "off" } else { "on" });
+        send(DesktopEvent::DisplaysAsleep(next == 2));
+    }
 }

@@ -42,10 +42,6 @@ impl Lyrics {
         }
     }
 
-    pub fn pin(&self, query: &LyricQuery, result: &LyricResult) -> bool {
-        self.service.as_ref().map(|s| s.pin(query, result)).unwrap_or(false)
-    }
-
     pub fn unpin(&self, query: &LyricQuery) {
         if let Some(service) = self.service.as_ref() {
             service.unpin(query);
@@ -57,8 +53,9 @@ impl Lyrics {
         parse::parse_import(text, duration)
     }
 
-    pub fn palette(&self, bytes: &[u8]) -> Option<Palette> {
-        palette::try_extract_palette(bytes)
+    /// Album palette; the fallback palette when the artwork can't be decoded.
+    pub fn palette(&self, bytes: &[u8]) -> Palette {
+        palette::extract_palette(bytes)
     }
 
     pub fn readings(&self, lines: &[Line], display: ReadingDisplay, tone_marks: bool) -> Vec<Option<Vec<Word>>> {
@@ -74,5 +71,13 @@ impl LyricOps for Lyrics {
 
     fn summary(&self, candidate: &Candidate, chosen: bool) -> CandidateSummary {
         lookup::summary(candidate, chosen)
+    }
+
+    fn pin(&self, query: &LyricQuery, result: &LyricResult) -> bool {
+        let saved = self.service.as_ref().map(|s| s.pin(query, result)).unwrap_or(false);
+        if !saved {
+            log::warn!("could not save the lyric choice for this recording");
+        }
+        saved
     }
 }
