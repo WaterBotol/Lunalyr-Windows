@@ -4,7 +4,7 @@ What has been verified, how, and what still needs a real Windows machine. There 
 
 ## Verified on GitHub Actions `windows-latest`
 
-The runner is **Windows Server 2025 Datacenter, build 26100** — the Windows 11 24H2 code base with the new "raised desktop" layout (Progman has `WS_EX_NOREDIRECTIONBITMAP`; `SHELLDLL_DefView` is a layered child of Progman). It has an interactive 1024×768 desktop and no audio device. Workflow: [`.github/workflows/windows.yml`](.github/workflows/windows.yml); smoke test: [`scripts/ci-smoke.ps1`](scripts/ci-smoke.ps1). Each run uploads the installer and a `smoke-<commit>` artifact (OS build, desktop window tree, two screenshots, the app log).
+Latest full run: [41934084391](https://github.com/WaterBotol/Lunalyr-Windows/actions/runs/41934084391) on commit `404e692` (all jobs passed). The runner is **Windows Server 2025 Datacenter, build 26100** — the Windows 11 24H2 code base with the new "raised desktop" layout (Progman has `WS_EX_NOREDIRECTIONBITMAP`; `SHELLDLL_DefView` is a layered child of Progman). It has an interactive 1024×768 desktop and no audio device. Workflow: [`.github/workflows/windows.yml`](.github/workflows/windows.yml); smoke test: [`scripts/ci-smoke.ps1`](scripts/ci-smoke.ps1). Each run uploads the installer and a `smoke-<commit>` artifact (OS build, desktop window tree, two screenshots, the app log).
 
 | Check | Evidence (CI run on `main`) |
 |---|---|
