@@ -12,6 +12,7 @@
 //   reveal      0/1 word reveal                preview  0/1 next-word preview
 //   interludes  0/1                            reduced  1 = reduce motion
 //   noLyrics    notice | trackName | nothing   hold     1 = keep notices up
+//   background  colour | spectrum | wavefield (visualisers get synthetic audio)
 //   snapshot    URL of a JSON Snapshot to render instead of the samples
 //   share       0 = don't sync settings with other open demo/settings pages
 // Example: demo.html?state=synced&composition=spoken&t=12.5&paused=1&controls=0
@@ -79,6 +80,14 @@ function settingsFromParams(): Partial<Settings> {
   if (noLyrics === "notice" || noLyrics === "trackName" || noLyrics === "nothing") s.noLyrics = noLyrics;
   const vividness = number("vividness");
   if (vividness !== undefined) s.vividness = vividness;
+  const background = params.get("background");
+  if (background === "spectrum" || background === "wavefield") {
+    s.background = "visualizer";
+    s.visualizer = background;
+    s.audioReactive = true;
+  } else if (background === "colour") {
+    s.background = "colour";
+  }
   const scrim = number("scrim");
   if (scrim !== undefined) s.scrimStrength = scrim;
   return s;
@@ -193,6 +202,11 @@ function buildControls(host: DemoHost, store: Store): void {
   select("Readings", [["off", "Off"], ["below", "Below"], ["replace", "Replace"]], settings().readings, (v) => patch({ readings: v as ReadingDisplay }), row2);
   select("Font", [["manrope", "Manrope"], ["system", "Segoe UI"], ["serif", "Serif"], ["slab", "Slab"], ["soft", "Soft"]], settings().font, (v) => patch({ font: v as FontChoice }), row2);
   select("No lyrics", [["notice", "Say so briefly"], ["trackName", "Title and artist"], ["nothing", "Nothing"]], settings().noLyrics, (v) => patch({ noLyrics: v as NoLyricsBehaviour }), row2);
+  const background = settings().background === "visualizer" ? settings().visualizer : "colour";
+  select("Background", [["colour", "Album colours"], ["spectrum", "Visualiser · Spectrum"], ["wavefield", "Visualiser · Wavefield"]], background, (v) => {
+    if (v === "colour") patch({ background: "colour" });
+    else patch({ background: "visualizer", visualizer: v as "spectrum" | "wavefield", audioReactive: true });
+  }, row2);
 
   const row3 = el("div", "demo-row", bar);
   const sizeWrap = el("label", "demo-field", row3);

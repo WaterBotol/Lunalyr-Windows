@@ -84,15 +84,16 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
                             if outcome.cached { ", cached" } else { "" },
                             if outcome.pinned { ", saved choice" } else { "" },
                         ),
-                        None => log::info!(
-                            "no lyrics for \"{}\" by {} ({:?})",
-                            query.title,
-                            query.artist,
-                            outcome.states
-                        ),
+                        None => {
+                            log::info!("no lyrics for \"{}\" by {} ({:?})", query.title, query.artist, outcome.states)
+                        }
                     }
-                    let effects =
-                        lock(&shared.controller).on_lookup_finished(generation, outcome, shared.lyrics.as_ref(), now_ms());
+                    let effects = lock(&shared.controller).on_lookup_finished(
+                        generation,
+                        outcome,
+                        shared.lyrics.as_ref(),
+                        now_ms(),
+                    );
                     run_effects(&app, effects);
                 });
             }
@@ -131,7 +132,7 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
                     log::error!("could not save settings: {error}");
                 }
             }
-            Effect::RebuildWallpapers => schedule_rebuild(app),
+            Effect::RebuildWallpapers { recreate } => schedule_rebuild(app, recreate),
             Effect::SetLaunchAtLogin(enabled) => {
                 if let Err(error) = platform::set_launch_at_login(enabled) {
                     log::error!("launch at login: {error}");
@@ -164,12 +165,12 @@ fn run_effects(app: &AppHandle, effects: Vec<Effect>) {
 }
 
 /// Rebuilds wallpaper windows on the main thread, then tells the controller.
-fn schedule_rebuild(app: &AppHandle) {
+fn schedule_rebuild(app: &AppHandle, recreate: bool) {
     let handle = app.clone();
     let result = app.run_on_main_thread(move || {
         let shared = state(&handle);
         let selection = lock(&shared.controller).settings().displays;
-        let windows = lock(&shared.wallpapers).rebuild(&handle, selection);
+        let windows = lock(&shared.wallpapers).rebuild(&handle, selection, recreate);
         let effects = lock(&shared.controller).set_windows(windows);
         run_effects(&handle, effects);
     });
@@ -185,12 +186,15 @@ pub(crate) fn show_settings(app: &AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    let built = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Lunalyr Settings")
         .inner_size(980.0, 720.0)
         .min_inner_size(720.0, 520.0)
-        .center()
-        .build();
+        .center();
+    // Must match the wallpapers' arguments (one shared WebView2 browser process).
+    #[cfg(windows)]
+    let builder = builder.additional_browser_args(wallpapers::BROWSER_ARGS);
+    let built = builder.build();
     if let Err(error) = built {
         log::error!("could not open settings: {error}");
     }
@@ -366,7 +370,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         log::error!("now-playing source unavailable: {error}");
     }
 
-    schedule_rebuild(&handle);
+    schedule_rebuild(&handle, false);
 
     // Watchdog: Explorer can recreate its desktop windows without telling us.
     let watchdog = handle.clone();
@@ -375,12 +379,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let app = watchdog.clone();
         let _ = watchdog.run_on_main_thread(move || {
             let shared = state(&app);
-            let repaired = lock(&shared.wallpapers).verify();
-            if repaired {
-                // Re-send render state: a re-attached webview may have reloaded.
-                let windows = lock(&shared.controller).windows().to_vec();
-                let effects = lock(&shared.controller).set_windows(windows);
-                run_effects(&app, effects);
+            let health = lock(&shared.wallpapers).verify();
+            match health {
+                wallpapers::Health::Fine => {}
+                wallpapers::Health::Repaired => {
+                    // Re-send render state: a re-attached webview may have reloaded.
+                    let windows = lock(&shared.controller).windows().to_vec();
+                    let effects = lock(&shared.controller).set_windows(windows);
+                    run_effects(&app, effects);
+                }
+                wallpapers::Health::Broken => schedule_rebuild(&app, true),
             }
         });
     })?;

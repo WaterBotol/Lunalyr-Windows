@@ -35,17 +35,43 @@ pub enum Target {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    Emit { event: &'static str, payload: Value, target: Target },
-    Lookup { generation: u64, query: LyricQuery, force: bool },
-    Pin { query: LyricQuery, result: LyricResult },
-    Unpin { query: LyricQuery },
-    ExtractPalette { generation: u64, bytes: Vec<u8> },
-    ComputeReadings { generation: u64, lines: Vec<lunalyr_core::model::Line> },
+    Emit {
+        event: &'static str,
+        payload: Value,
+        target: Target,
+    },
+    Lookup {
+        generation: u64,
+        query: LyricQuery,
+        force: bool,
+    },
+    Pin {
+        query: LyricQuery,
+        result: LyricResult,
+    },
+    Unpin {
+        query: LyricQuery,
+    },
+    ExtractPalette {
+        generation: u64,
+        bytes: Vec<u8>,
+    },
+    ComputeReadings {
+        generation: u64,
+        lines: Vec<lunalyr_core::model::Line>,
+    },
     SaveSettings,
-    RebuildWallpapers,
+    /// Match wallpaper windows to the monitors; `recreate` replaces every
+    /// window (after an Explorer restart the attached ones are destroyed).
+    RebuildWallpapers {
+        recreate: bool,
+    },
     SetLaunchAtLogin(bool),
     SetAudio(bool),
-    Tray { now_playing: String, paused: bool },
+    Tray {
+        now_playing: String,
+        paused: bool,
+    },
 }
 
 /// Result of a lookup, as produced by `lyrics::lookup`.
@@ -292,9 +318,10 @@ impl Controller {
                 effects.extend(self.audio_effects());
                 effects
             }
-            PlatformEvent::Desktop(DesktopEvent::DisplaysChanged | DesktopEvent::ShellRestarted) => {
-                vec![Effect::RebuildWallpapers]
+            PlatformEvent::Desktop(DesktopEvent::DisplaysChanged) => {
+                vec![Effect::RebuildWallpapers { recreate: false }]
             }
+            PlatformEvent::Desktop(DesktopEvent::ShellRestarted) => vec![Effect::RebuildWallpapers { recreate: true }],
             PlatformEvent::Audio(frame) => vec![Self::emit(events::AUDIO, &frame, Target::Wallpapers)],
             PlatformEvent::AudioStatus(status) => {
                 log::info!("audio: {status}");
@@ -318,7 +345,13 @@ impl Controller {
             self.lyrics = LyricsView::Idle;
             self.idle_since = Some(now_ms);
             self.generation += 1;
-            return vec![self.emit_track(), self.emit_lyrics(), self.emit_lookup(), self.emit_clock(now_ms), self.tray()];
+            return vec![
+                self.emit_track(),
+                self.emit_lyrics(),
+                self.emit_lookup(),
+                self.emit_clock(now_ms),
+                self.tray(),
+            ];
         };
 
         let previous = self.media.replace(info.clone());
@@ -386,15 +419,10 @@ impl Controller {
             return Vec::new();
         }
         self.candidates = outcome.candidates.clone();
-        let chosen_source = outcome.result.as_ref().and_then(|r| {
-            outcome.candidates.iter().find(|c| &c.result == r).map(|c| c.source)
-        });
+        let chosen_source =
+            outcome.result.as_ref().and_then(|r| outcome.candidates.iter().find(|c| &c.result == r).map(|c| c.source));
         self.lookup = LookupInfo {
-            candidates: outcome
-                .candidates
-                .iter()
-                .map(|c| ops.summary(c, Some(c.source) == chosen_source))
-                .collect(),
+            candidates: outcome.candidates.iter().map(|c| ops.summary(c, Some(c.source) == chosen_source)).collect(),
             states: outcome.states.clone(),
             pinned: outcome.pinned,
             cached: outcome.cached,
@@ -477,7 +505,7 @@ impl Controller {
             effects.push(self.emit_clock(now_ms));
         }
         if previous.displays != next.displays {
-            effects.push(Effect::RebuildWallpapers);
+            effects.push(Effect::RebuildWallpapers { recreate: false });
         }
         if previous.launch_at_login != next.launch_at_login {
             effects.push(Effect::SetLaunchAtLogin(next.launch_at_login));
@@ -495,13 +523,12 @@ impl Controller {
         };
         if sources_changed && self.query.is_some() {
             effects.extend(self.start_lookup(false));
-        } else if previous.sources.repair_qq_gaps != next.sources.repair_qq_gaps
+        } else if (previous.sources.repair_qq_gaps != next.sources.repair_qq_gaps
             || previous.readings != next.readings
-            || previous.tone_marks != next.tone_marks
+            || previous.tone_marks != next.tone_marks)
+            && self.raw.is_some()
         {
-            if self.raw.is_some() {
-                effects.extend(self.apply_raw(ops, now_ms));
-            }
+            effects.extend(self.apply_raw(ops, now_ms));
         }
         Ok((next, effects))
     }
@@ -510,10 +537,19 @@ impl Controller {
         self.start_lookup(true)
     }
 
-    pub fn select_candidate(&mut self, source: SourceId, ops: &dyn LyricOps, now_ms: f64) -> Result<Vec<Effect>, String> {
+    pub fn select_candidate(
+        &mut self,
+        source: SourceId,
+        ops: &dyn LyricOps,
+        now_ms: f64,
+    ) -> Result<Vec<Effect>, String> {
         let query = self.query.clone().ok_or("Nothing is playing.")?;
-        let candidate =
-            self.candidates.iter().find(|c| c.source == source).cloned().ok_or("That source has no match for this song.")?;
+        let candidate = self
+            .candidates
+            .iter()
+            .find(|c| c.source == source)
+            .cloned()
+            .ok_or("That source has no match for this song.")?;
         self.generation += 1;
         self.raw = Some(candidate.result.clone());
         self.lookup.pinned = true;
@@ -622,7 +658,14 @@ mod tests {
     }
 
     fn candidate(source: SourceId) -> Candidate {
-        Candidate { source, result: synced(), title: "Song".into(), artist: "Artist".into(), duration: Some(200.0), score: 1.0 }
+        Candidate {
+            source,
+            result: synced(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            duration: Some(200.0),
+            score: 1.0,
+        }
     }
 
     fn lookups(effects: &[Effect]) -> Vec<(u64, bool)> {
@@ -685,7 +728,9 @@ mod tests {
         let effects = c.on_platform(PlatformEvent::Media(MediaEvent::Track(None)), 99.0);
         assert_eq!(emitted(&effects, events::LYRICS)[0]["status"], "idle");
         assert_eq!(emitted(&effects, events::TRACK)[0]["idleSince"], 99.0);
-        assert!(effects.iter().any(|e| matches!(e, Effect::Tray { now_playing, .. } if now_playing == "Nothing playing")));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::Tray { now_playing, .. } if now_playing == "Nothing playing")));
     }
 
     #[test]
@@ -729,6 +774,19 @@ mod tests {
     }
 
     #[test]
+    fn explorer_restart_recreates_and_display_change_reattaches() {
+        let mut c = Controller::new(Settings::default(), "t");
+        assert_eq!(
+            c.on_platform(PlatformEvent::Desktop(DesktopEvent::ShellRestarted), 0.0),
+            vec![Effect::RebuildWallpapers { recreate: true }]
+        );
+        assert_eq!(
+            c.on_platform(PlatformEvent::Desktop(DesktopEvent::DisplaysChanged), 0.0),
+            vec![Effect::RebuildWallpapers { recreate: false }]
+        );
+    }
+
+    #[test]
     fn user_pause_wins_and_stops_audio() {
         let mut c = Controller::new(Settings { background: BackgroundMode::Visualizer, ..Settings::default() }, "t");
         let start = c.set_windows(vec![("wallpaper-a".into(), "A".into())]);
@@ -746,13 +804,12 @@ mod tests {
             c.update_settings(&serde_json::json!({"lyricScale": 7, "displays": "primary"}), &Ops, 0.0).unwrap();
         assert_eq!(settings.lyric_scale, 2.0);
         assert!(effects.contains(&Effect::SaveSettings));
-        assert!(effects.contains(&Effect::RebuildWallpapers));
+        assert!(effects.contains(&Effect::RebuildWallpapers { recreate: false }));
         assert!(c.update_settings(&serde_json::json!({"frameRate": "fast"}), &Ops, 0.0).is_err());
         assert!(c.update_settings(&serde_json::json!(3), &Ops, 0.0).is_err());
         let mut sources = c.settings().sources.clone();
         sources.enabled.retain(|s| *s != SourceId::NetEase);
-        let (_, effects) =
-            c.update_settings(&serde_json::json!({"sources": to_value(&sources)}), &Ops, 0.0).unwrap();
+        let (_, effects) = c.update_settings(&serde_json::json!({"sources": to_value(&sources)}), &Ops, 0.0).unwrap();
         assert_eq!(lookups(&effects).len(), 1, "changing sources re-runs the lookup");
     }
 

@@ -12,6 +12,7 @@ import { COMMANDS, EVENTS } from "../contract";
 import { defaultSettings, emptySnapshot, fallbackPalette, SOURCE_IDS, SOURCE_TITLES } from "../defaults";
 import { songOffsetKey } from "../sha256";
 import { trackSeed } from "../timing/seed";
+import { syntheticAudio } from "./audio";
 import { parseImport, precisionOf } from "./lrc";
 import { asLineTimed, PALETTES, PLAIN_LYRICS, SONGS, type DemoSong } from "./samples";
 
@@ -63,6 +64,7 @@ export class DemoHost implements Bridge {
   private customSnapshot: Snapshot | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private holdTimer: ReturnType<typeof setInterval> | null = null;
+  private audioTimer: ReturnType<typeof setInterval> | null = null;
   private channel: BroadcastChannel | null = null;
   private readonly id = Math.random().toString(36).slice(2);
   private readonly follow: boolean;
@@ -87,7 +89,11 @@ export class DemoHost implements Bridge {
     let set = this.handlers.get(event);
     if (!set) this.handlers.set(event, (set = new Set()));
     set.add(handler as Handler);
-    return () => set!.delete(handler as Handler);
+    if (event === EVENTS.audio) this.updateAudio();
+    return () => {
+      set!.delete(handler as Handler);
+      if (event === EVENTS.audio) this.updateAudio();
+    };
   }
 
   async invoke<T = unknown>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -298,6 +304,7 @@ export class DemoHost implements Bridge {
   }
 
   dispose(): void {
+    if (this.audioTimer) clearInterval(this.audioTimer);
     if (this.loopTimer) clearTimeout(this.loopTimer);
     if (this.holdTimer) clearInterval(this.holdTimer);
     this.channel?.close();
@@ -314,6 +321,7 @@ export class DemoHost implements Bridge {
     const previous = this.state.settings;
     this.state.settings = structuredClone(next);
     this.emit(EVENTS.settings, this.state.settings);
+    this.updateAudio();
     if (broadcast) this.post({ kind: "settings", from: this.id, settings: this.state.settings });
     if (previous.readings !== next.readings || previous.toneMarks !== next.toneMarks) {
       if (this.state.lyrics.status === "synced") {
@@ -331,6 +339,7 @@ export class DemoHost implements Bridge {
   private setRender(render: Snapshot["render"], broadcast: boolean): void {
     this.state.render = { ...render };
     this.emit(EVENTS.render, this.state.render);
+    this.updateAudio();
     if (broadcast) this.post({ kind: "render", from: this.id, render: this.state.render });
   }
 
@@ -468,6 +477,18 @@ export class DemoHost implements Bridge {
     return `Imported ${lines.length} lines (${precisionOf(lines).toLowerCase()}). Saved for this recording.`;
   }
 
+  /** Like the app: audio frames flow (~30 Hz) only while a visualiser is shown and the wallpaper runs. */
+  private updateAudio(): void {
+    const wanted = this.state.settings.background === "visualizer" && this.state.clock.playing && !this.state.render.paused
+      && this.state.track.track !== null && (this.handlers.get(EVENTS.audio)?.size ?? 0) > 0;
+    if (wanted && !this.audioTimer) {
+      this.audioTimer = setInterval(() => this.emit(EVENTS.audio, syntheticAudio(this.position())), 33);
+    } else if (!wanted && this.audioTimer) {
+      clearInterval(this.audioTimer);
+      this.audioTimer = null;
+    }
+  }
+
   private refreshNotices(): void {
     const now = Date.now();
     if (this.state.lyrics.status === "notFound") {
@@ -482,6 +503,7 @@ export class DemoHost implements Bridge {
 
   /** Loop the demo song: one timer for the loop point, none while paused. */
   private scheduleLoop(): void {
+    this.updateAudio();
     if (this.loopTimer) clearTimeout(this.loopTimer);
     this.loopTimer = null;
     const clock = this.state.clock;

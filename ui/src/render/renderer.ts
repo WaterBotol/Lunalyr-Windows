@@ -175,8 +175,10 @@ export class WallpaperRenderer {
     const stops = this.palette.at(nowPerf);
     // Ambient clock: flow at 0.70 × effect speed; the colour field uses a third of it.
     const flow = this.ambient.advance(nowPerf / 1000, settings.effectSpeed * 0.7);
-    if (this.visualizer.active) this.visualizer.render(nowPerf, flow, stops, settings, this.metrics);
-    else this.background.render(flow * 0.34, stops, settings.vividness);
-    this.scene.render({ track: state.track, lyrics: state.lyrics, settings, time, now, reduced: this.reduced(), accent: this.accent });
+    const reduced = this.reduced();
+    // Wavefield draws its own background; the spectrum sits over the colour field.
+    if (!this.visualizer.active) this.background.render(flow * 0.34, stops, settings.vividness);
+    if (this.visualizer.drawing) this.visualizer.render(nowPerf, flow, stops, settings, this.metrics, reduced, state.track.palette.fromArtwork);
+    this.scene.render({ track: state.track, lyrics: state.lyrics, settings, time, now, reduced, accent: this.accent });
   }
 }
