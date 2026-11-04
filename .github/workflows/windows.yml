@@ -87,7 +87,7 @@ jobs:
 
       - name: Smoke test (launch, screenshot the desktop, collect the log)
         shell: pwsh
-        run: ./scripts/ci-smoke.ps1 -Exe target/release/lunalyr.exe -OutDir smoke
+        run: ./scripts/ci-smoke.ps1 -Exe target/release/lunalyr.exe -OutDir smoke -Seconds 40
 
       - name: Upload installer and app
         uses: actions/upload-artifact@v7

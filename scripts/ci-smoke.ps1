@@ -11,7 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [string]$OutDir = "smoke",
-    [int]$Seconds = 25
+    [int]$Seconds = 40
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +44,12 @@ public static class DesktopTree {
         return String.Format("0x{0:X} class={1} title=\"{2}\" visible={3} style=0x{4:X8} exstyle=0x{5:X8} rect=({6},{7},{8},{9}) parent=0x{10:X}",
             h.ToInt64(), c, t, IsWindowVisible(h), GetWindowLong(h, -16), GetWindowLong(h, -20), r.L, r.T, r.R, r.B, GetParent(h).ToInt64());
     }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    public static bool Close(string title) {
+        var h = FindWindow(null, title);
+        return h != IntPtr.Zero && PostMessage(h, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
+    }
     public static string Dump() {
         var lines = new List<string>();
         EnumWindows((top, _) => {
@@ -69,9 +75,14 @@ public static class DesktopTree {
 $mediaScript = Join-Path $PSScriptRoot "ci-media-session.ps1"
 $media = $null
 if (Test-Path $mediaScript) {
-    $media = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $mediaScript, "-Seconds", ($Seconds + 20) -PassThru -WindowStyle Hidden `
+    $media = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $mediaScript, "-Seconds", ($Seconds + 30) -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput "$OutDir/media-session.txt" -RedirectStandardError "$OutDir/media-session-err.txt"
-    Start-Sleep -Seconds 3
+    # Wait (up to 20 s) until the session is published.
+    for ($i = 0; $i -lt 40; $i++) {
+        if ((Test-Path "$OutDir/media-session.txt") -and (Select-String -Path "$OutDir/media-session.txt" -Pattern "started" -Quiet)) { break }
+        if ($media.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 $env:RUST_LOG = "debug"
@@ -86,13 +97,23 @@ Start-Sleep -Seconds 6
 
 [DesktopTree]::Dump() | Tee-Object -FilePath "$OutDir/desktop-tree.txt"
 
+# Runner images sometimes show a "System Properties" paging-file notice.
+[void][DesktopTree]::Close("System Properties")
+Start-Sleep -Seconds 1
+
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
-$bitmap.Save("$OutDir/desktop.png", [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose(); $bitmap.Dispose()
+function Save-Screen([string]$Path) {
+    $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
+    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $graphics.Dispose(); $bitmap.Dispose()
+}
+# Two frames a few seconds apart show whether the lyrics move with the song.
+Save-Screen "$OutDir/desktop.png"
+Start-Sleep -Seconds 3
+Save-Screen "$OutDir/desktop-2.png"
 
 $alive = -not $app.HasExited
 if ($alive) { Stop-Process -Id $app.Id -Force }
