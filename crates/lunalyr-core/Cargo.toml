@@ -20,7 +20,11 @@ async-trait = "0.1"
 regex = "1"
 # TLS comes from the OS: SChannel on Windows, Security.framework on macOS.
 # No ring / aws-lc / openssl, so nothing needs a C toolchain on Windows.
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip"] }
+# `system-proxy`: besides HTTP(S)_PROXY / ALL_PROXY, use the proxy set in
+# Windows Settings (HKCU Internet Settings, as Clash / v2rayN "system proxy"
+# and corporate policies write it), as URLSession does on macOS. Pure Rust
+# (windows-registry), read when the client is built.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip", "system-proxy"] }
 # Lyrics+ nodes send gzip bodies without Content-Encoding (miniz_oxide backend).
 flate2 = "1"
 base64 = "0.22"

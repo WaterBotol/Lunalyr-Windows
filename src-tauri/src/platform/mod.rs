@@ -96,11 +96,16 @@ pub struct MonitorInfo {
 pub enum DesktopEvent {
     /// Monitors added/removed/moved/rescaled, or work area changed. Rebuild.
     DisplaysChanged,
-    /// Explorer restarted (TaskbarCreated) or our WorkerW parent was destroyed.
+    /// Explorer restarted (TaskbarCreated), or the desktop window the
+    /// wallpapers are children of was destroyed (Progman, or the legacy
+    /// layout's WorkerW), taking them with it. Not sent when Explorer replaces
+    /// the raised desktop's WorkerW, which is only their sibling: the
+    /// watchdog's `is_attached` check re-attaches them then.
     ShellRestarted,
     /// For each monitor id: is it covered by a full-screen or maximised app?
     Coverage(Vec<(String, bool)>),
-    /// Workstation locked (true) / unlocked (false). Pause while locked.
+    /// Workstation locked (true) / unlocked (false), including a lock already
+    /// in place when the watcher started. Pause while locked.
     SessionLocked(bool),
     /// Every display of this session is off (true) or on again (false).
     DisplaysAsleep(bool),

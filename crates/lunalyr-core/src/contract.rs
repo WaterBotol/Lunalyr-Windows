@@ -160,6 +160,10 @@ pub struct LookupInfo {
     pub states: Vec<(SourceId, String)>,
     pub pinned: bool,
     pub cached: bool,
+    /// A lookup is running (the settings window shows progress; the
+    /// wallpaper keeps showing the current lyrics during a refresh).
+    #[serde(default)]
+    pub searching: bool,
 }
 
 /// Audio analysis for visualisers (Milestone 2).

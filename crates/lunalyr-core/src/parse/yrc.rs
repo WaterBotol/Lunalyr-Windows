@@ -154,6 +154,17 @@ mod tests {
     }
 
     #[test]
+    fn zero_width_space_pieces_are_blank() {
+        // CharacterSet.whitespaces includes U+200B: macOS drops such a row.
+        assert!(parse_yrc("[1000,2000](1000,500,0)\u{200B}").is_empty());
+        let lines = parse_yrc("[0,1000](0,500,0)Hi(500,200,0)\u{200B}\n[1000,1000](1000,500,0)\u{200B} ");
+        assert_eq!(lines.len(), 1);
+        let texts: Vec<&str> = lines[0].words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["Hi"]);
+        assert_eq!(lines[0].text, "Hi");
+    }
+
+    #[test]
     fn line_without_words_is_instrumental() {
         let lines = parse_yrc("[0,1000]Text without word stamps");
         assert!(lines.is_empty(), "the text only counts inside word stamps");

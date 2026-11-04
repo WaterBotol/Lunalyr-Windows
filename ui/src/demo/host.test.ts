@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
-import type { LyricsView, PlaybackClock, Settings } from "../contract";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LookupInfo, LyricsView, PlaybackClock, Settings, Snapshot } from "../contract";
 import { COMMANDS, EVENTS } from "../contract";
+import { emptySnapshot } from "../defaults";
 import { songOffsetKey } from "../sha256";
 import { Store, connectStore } from "../store";
 import { DemoHost } from "./host";
@@ -15,6 +16,8 @@ function host(options: ConstructorParameters<typeof DemoHost>[0] = {}): DemoHost
 }
 afterEach(() => {
   while (hosts.length) hosts.pop()!.dispose();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("demo host (in-memory contract feed)", () => {
@@ -81,6 +84,79 @@ describe("demo host (in-memory contract feed)", () => {
     expect(message).toMatch(/Imported 2 lines/);
     const lyrics = h.current.lyrics;
     expect(lyrics.status === "synced" && lyrics.provenance.precision).toBe("Mixed timing");
+  });
+
+  it("rejects a failed import or forget like the app's commands", async () => {
+    const h = host({ scenario: "word", paused: true });
+    await expect(h.invoke(COMMANDS.importLyrics, { text: "no timestamps here" })).rejects.toThrow("This file has no usable LRC or TTML timestamps.");
+    const idle = host({ scenario: "idle" });
+    await expect(idle.invoke(COMMANDS.importLyrics, { text: "[00:01.00]Hi" })).rejects.toThrow(/Play a song first/);
+    await expect(idle.invoke(COMMANDS.forgetSelection)).rejects.toThrow("Nothing is playing.");
+  });
+
+  it("reports a running lookup in LookupInfo.searching and keeps lyrics on screen during a refresh", async () => {
+    vi.useFakeTimers();
+    const h = host({ scenario: "word", paused: true });
+    expect(h.current.lookup.searching).toBe(false);
+    const lookups: LookupInfo[] = [];
+    const lyrics: LyricsView[] = [];
+    await h.listen(EVENTS.lookup, (l) => lookups.push(l));
+    await h.listen(EVENTS.lyrics, (l) => lyrics.push(l));
+    await h.invoke(COMMANDS.reloadLyrics);
+    expect(lookups.at(-1)?.searching).toBe(true);
+    expect(lookups.at(-1)?.candidates.length).toBeGreaterThan(0);
+    expect(lyrics).toEqual([]);
+    expect(h.current.lyrics.status).toBe("synced");
+    vi.advanceTimersByTime(700);
+    expect(lookups.at(-1)?.searching).toBe(false);
+    expect(h.current.lookup.searching).toBe(false);
+  });
+
+  it("shows the spinner only when no lyrics are on screen", async () => {
+    vi.useFakeTimers();
+    const h = host({ scenario: "notFound", paused: true });
+    await h.invoke(COMMANDS.reloadLyrics);
+    expect(h.current.lyrics.status).toBe("loading");
+    expect(h.current.lookup.searching).toBe(true);
+    vi.advanceTimersByTime(700);
+    expect(h.current.lyrics.status).toBe("notFound");
+    expect(h.current.lookup.searching).toBe(false);
+  });
+
+  it("a choice ends a running lookup; the loading scenario never finishes", async () => {
+    const h = host({ scenario: "word", paused: true });
+    await h.invoke(COMMANDS.reloadLyrics);
+    expect(h.current.lookup.searching).toBe(true);
+    await h.invoke(COMMANDS.selectCandidate, { source: "lrclib" });
+    expect(h.current.lookup.searching).toBe(false);
+    expect(host({ scenario: "loading", paused: true }).current.lookup.searching).toBe(true);
+    expect(host({ scenario: "idle" }).current.lookup.searching).toBe(false);
+  });
+
+  it("gives snapshots saved without `searching` the default", () => {
+    const h = host();
+    const old = emptySnapshot();
+    const { searching: _, ...lookup } = old.lookup;
+    h.loadSnapshot({ ...old, lookup } as unknown as Snapshot);
+    expect(h.current.lookup.searching).toBe(false);
+  });
+
+  it("open_link opens the project pages in a new tab and nothing else", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    const h = host();
+    await h.invoke(COMMANDS.openLink, { target: "project" });
+    await h.invoke(COMMANDS.openLink, { target: "mac" });
+    await h.invoke(COMMANDS.openLink, { target: "upstream" });
+    expect(open.mock.calls.map((c) => c[0])).toEqual([
+      "https://github.com/WaterBotol/Lunalyr-Windows",
+      "https://github.com/WaterBotol/Lunalyr",
+      "https://github.com/AkkiCode06/verso",
+    ]);
+    expect(open.mock.calls[0].slice(1)).toEqual(["_blank", "noopener,noreferrer"]);
+    await expect(h.invoke(COMMANDS.openLink, { target: "license:LICENSE.txt" })).rejects.toThrow();
+    await expect(h.invoke(COMMANDS.openLink, { target: "https://example.com" })).rejects.toThrow("Unknown link.");
+    expect(open).toHaveBeenCalledTimes(3);
   });
 
   it("feeds a Store through connectStore", async () => {

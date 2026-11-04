@@ -9,7 +9,8 @@
 import type { Bridge, EventName, EventPayloads, Unlisten } from "../bridge";
 import type { CandidateSummary, Line, LookupInfo, LyricsView, Settings, Snapshot, SourceId, Track, Word } from "../contract";
 import { COMMANDS, EVENTS } from "../contract";
-import { defaultSettings, emptySnapshot, fallbackPalette, SOURCE_IDS, SOURCE_TITLES } from "../defaults";
+import { defaultSettings, emptyLookup, emptySnapshot, fallbackPalette, SOURCE_IDS, SOURCE_TITLES } from "../defaults";
+import { linkUrl } from "../links";
 import { songOffsetKey } from "../sha256";
 import { trackSeed } from "../timing/seed";
 import { syntheticAudio } from "./audio";
@@ -63,6 +64,9 @@ export class DemoHost implements Bridge {
   private chosen: SourceId = "lyricsPlus";
   private customSnapshot: Snapshot | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
+  private lookupTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A simulated lookup is running (a reload, or the never-ending "loading" scenario). */
+  private searching = false;
   private holdTimer: ReturnType<typeof setInterval> | null = null;
   private audioTimer: ReturnType<typeof setInterval> | null = null;
   private channel: BroadcastChannel | null = null;
@@ -129,6 +133,14 @@ export class DemoHost implements Bridge {
       case COMMANDS.setUserPaused:
         this.setRender({ paused: Boolean(args.paused), reason: args.paused ? "user" : "" }, true);
         return null;
+      case COMMANDS.openLink: {
+        // Web pages open in a new tab; licence files are linked directly by the demo pages.
+        const target = String(args.target ?? "");
+        const url = linkUrl(target);
+        if (!url) throw new Error(target.startsWith("license:") ? "Licence files open from the installed app." : "Unknown link.");
+        if (typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");
+        return null;
+      }
       default:
         throw new Error(`Unknown command ${command}`);
     }
@@ -170,6 +182,7 @@ export class DemoHost implements Bridge {
 
   private adopt(p: SharedPlayback): void {
     if (this.scenario === "snapshot") return;
+    this.cancelLookup();
     this.scenario = p.scenario;
     this.song = p.scenario === "word" ? SONGS.word : p.scenario === "line" ? SONGS.line : null;
     this.lineReadings = this.song ? this.song.readings : [];
@@ -177,7 +190,8 @@ export class DemoHost implements Bridge {
     this.pinned = p.pinned;
     this.state.track = p.track;
     this.state.lyrics = p.lyrics;
-    this.state.lookup = p.lookup;
+    this.state.lookup = { ...emptyLookup(), ...p.lookup };
+    this.searching = this.state.lookup.searching;
     this.state.clock = p.clock;
     this.scheduleLoop();
     this.emit(EVENTS.track, this.state.track);
@@ -219,6 +233,9 @@ export class DemoHost implements Bridge {
 
   setScenario(scenario: DemoScenario, options: { time?: number; paused?: boolean; emit?: boolean } = {}): void {
     const emit = options.emit ?? true;
+    this.cancelLookup();
+    // "loading" is a lookup that never finishes.
+    this.searching = scenario === "loading";
     this.scenario = scenario;
     this.customSnapshot = scenario === "snapshot" ? this.customSnapshot : null;
     const now = Date.now();
@@ -248,12 +265,16 @@ export class DemoHost implements Bridge {
 
   /** Render a Snapshot loaded from a file (demo.html?snapshot=url). */
   loadSnapshot(snapshot: Snapshot, options: { time?: number; paused?: boolean } = {}): void {
+    this.cancelLookup();
     this.customSnapshot = snapshot;
     this.scenario = "snapshot";
     this.song = null;
     const now = Date.now();
     this.state = structuredClone({ ...emptySnapshot(), ...snapshot, version: snapshot.version || "fixture" });
     this.state.settings = { ...defaultSettings(), ...snapshot.settings };
+    // Snapshots saved before a contract field existed get its default.
+    this.state.lookup = { ...emptyLookup(), ...snapshot.lookup };
+    this.searching = this.state.lookup.searching;
     this.lineReadings = snapshot.lyrics.status === "synced" ? snapshot.lyrics.readings : [];
     this.state.clock = {
       position: options.time ?? snapshot.clock?.position ?? 0,
@@ -308,6 +329,7 @@ export class DemoHost implements Bridge {
     if (this.audioTimer) clearInterval(this.audioTimer);
     if (this.loopTimer) clearTimeout(this.loopTimer);
     if (this.holdTimer) clearInterval(this.holdTimer);
+    this.cancelLookup();
     this.channel?.close();
   }
 
@@ -410,18 +432,26 @@ export class DemoHost implements Bridge {
   private pinned = false;
 
   private lookupInfo(): LookupInfo {
-    if (this.scenario === "idle") return { candidates: [], states: [], pinned: false, cached: false };
+    if (this.scenario === "idle") return emptyLookup();
     const found = new Set(this.candidates().map((c) => c.source));
     const enabled = new Set(this.state.settings.sources.enabled);
     const states: [SourceId, string][] = SOURCE_IDS.map((id) => [
       id,
-      !enabled.has(id) ? "Disabled" : this.scenario === "loading" ? "Searching…" : found.has(id) ? "Match found" : id === "localFiles" ? "No folder chosen" : "No match",
+      !enabled.has(id) ? "Disabled" : this.searching ? "Searching…" : found.has(id) ? "Match found" : id === "localFiles" ? "No folder chosen" : "No match",
     ]);
-    return { candidates: this.candidates(), states, pinned: this.pinned, cached: false };
+    return { candidates: this.candidates(), states, pinned: this.pinned, cached: false, searching: this.searching };
+  }
+
+  /** A new scenario, choice or import supersedes a lookup still running (the app's lookup generation). */
+  private cancelLookup(): void {
+    if (this.lookupTimer) clearTimeout(this.lookupTimer);
+    this.lookupTimer = null;
+    this.searching = false;
   }
 
   private select(source: SourceId): void {
     if (!this.song) return;
+    this.cancelLookup();
     this.chosen = source;
     this.pinned = true;
     this.state.lyrics = this.lyricsView(Date.now());
@@ -432,18 +462,31 @@ export class DemoHost implements Bridge {
   }
 
   private forget(): void {
+    if (!this.state.track.track) throw new Error("Nothing is playing.");
     this.pinned = false;
     if (this.song) this.chosen = this.song.id === "line" ? "lrclib" : "lyricsPlus";
+    this.state.lookup = { ...this.state.lookup, pinned: false };
     this.reload();
   }
 
+  /**
+   * Like the app: a refresh keeps lyrics that are on screen until the new
+   * result arrives (only an empty screen shows the spinner), and
+   * `lookup.searching` reports the progress to the settings window.
+   */
   private reload(): void {
     if (this.scenario === "idle" || this.scenario === "snapshot") return;
-    const restore = this.scenario;
-    this.state.lyrics = { status: "loading" };
-    this.emit(EVENTS.lyrics, this.state.lyrics);
-    setTimeout(() => {
-      if (this.scenario !== restore) return;
+    this.cancelLookup();
+    if (this.state.lyrics.status !== "synced" && this.state.lyrics.status !== "plain") {
+      this.state.lyrics = { status: "loading" };
+      this.emit(EVENTS.lyrics, this.state.lyrics);
+    }
+    this.searching = true;
+    this.state.lookup = { ...this.state.lookup, searching: true };
+    this.emit(EVENTS.lookup, this.state.lookup);
+    this.lookupTimer = setTimeout(() => {
+      this.lookupTimer = null;
+      this.searching = this.scenario === "loading";
       this.state.lyrics = this.lyricsView(Date.now());
       this.state.lookup = this.lookupInfo();
       this.emit(EVENTS.lyrics, this.state.lyrics);
@@ -463,11 +506,13 @@ export class DemoHost implements Bridge {
     this.applySettings({ ...this.state.settings, songOffsets: offsets }, true);
   }
 
+  /** Fails like the app's command (the promise rejects with the reason). */
   private importLyrics(text: string): string {
     const track = this.state.track.track;
-    if (!track) return "Play a song first.";
+    if (!track) throw new Error("Play a song first, then import its lyrics.");
     const lines = parseImport(text, track.duration);
-    if (lines.length === 0) return "This file has no usable LRC or TTML timestamps.";
+    if (lines.length === 0) throw new Error("This file has no usable LRC or TTML timestamps.");
+    this.cancelLookup();
     this.lineReadings = [];
     this.pinned = true;
     this.state.lyrics = { status: "synced", lines, provenance: { precision: precisionOf(lines), source: "Imported lyrics" }, readings: [] };

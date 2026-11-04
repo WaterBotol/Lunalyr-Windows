@@ -111,6 +111,8 @@ pub struct Controller {
     locked: bool,
     /// All displays are off (power saving): nothing is visible.
     displays_asleep: bool,
+    /// Lookups re-run for this track because its duration was corrected.
+    duration_corrections: u8,
     coverage: HashMap<String, bool>,
     /// (window label, monitor id)
     windows: Vec<(String, String)>,
@@ -152,6 +154,7 @@ impl Controller {
             user_paused: false,
             locked: false,
             displays_asleep: false,
+            duration_corrections: 0,
             coverage: HashMap::new(),
             windows: Vec::new(),
             sent_render: HashMap::new(),
@@ -279,8 +282,11 @@ impl Controller {
         self.settings.background == BackgroundMode::Visualizer && self.settings.audio_reactive
     }
 
+    /// Capture runs only while at least one wallpaper is rendering (render
+    /// state covers user pause, lock, displays off and covered monitors).
     fn audio_effects(&mut self) -> Vec<Effect> {
-        let wanted = self.wants_audio() && !self.user_paused && !self.locked && !self.displays_asleep;
+        let rendering = self.windows.iter().any(|(label, _)| !self.render_state(label).paused);
+        let wanted = self.wants_audio() && rendering;
         if wanted != self.audio_on {
             self.audio_on = wanted;
             vec![Effect::SetAudio(wanted)]
@@ -318,7 +324,9 @@ impl Controller {
                 for (monitor, covered) in list {
                     self.coverage.insert(monitor, covered);
                 }
-                self.render_effects()
+                let mut effects = self.render_effects();
+                effects.extend(self.audio_effects());
+                effects
             }
             PlatformEvent::Desktop(DesktopEvent::SessionLocked(locked)) => {
                 self.locked = locked;
@@ -385,20 +393,27 @@ impl Controller {
         self.idle_since = None;
 
         if same {
-            // Same title/artist/album. A late or corrected duration changes the
-            // recording key, under which caches, saved choices and offsets are
-            // stored, so the lookup runs again (macOS handleTrackChange keys by
-            // recording); the current lyrics stay up until it finishes.
-            let key_changed = self.track.as_ref().map(|t| t.recording_key != track.recording_key).unwrap_or(true);
-            self.query = Some(query.clone());
-            let changed = self.track.as_ref() != Some(&track);
-            self.track = Some(track);
-            let mut effects = Vec::new();
-            if changed {
-                effects.push(self.emit_track());
-                effects.push(self.emit_clock(now_ms));
+            // Same title/artist/album. Players often publish the new title
+            // before its timeline, so the first duration can be 0 or the
+            // previous track's. Adopt a later duration only when it arrives or
+            // differs beyond the match tolerance (rank::is_plausible: 3 s or
+            // 2 %); that changes the recording key (caches, saved choices,
+            // offsets), so the lookup runs again while the current lyrics stay
+            // up (macOS handleTrackChange keys by recording). Small jitter is
+            // ignored so per-song offsets don't flip between keys, and at most
+            // two corrections per track stop live streams with a growing
+            // EndTime from looping lookups.
+            let was = self.query.as_ref().map(|q| q.duration).unwrap_or(0.0);
+            let now = query.duration;
+            let significant = now > 0.0 && (was <= 0.0 || (was - now).abs() > f64::max(3.0, now * 0.02));
+            if !significant {
+                return Vec::new();
             }
-            if key_changed {
+            self.query = Some(query);
+            self.track = Some(track);
+            let mut effects = vec![self.emit_track(), self.emit_clock(now_ms)];
+            if self.duration_corrections < 2 {
+                self.duration_corrections += 1;
                 self.candidates.clear();
                 self.lookup = LookupInfo::default();
                 effects.push(self.emit_lookup());
@@ -415,6 +430,7 @@ impl Controller {
         self.candidates.clear();
         self.lookup = LookupInfo::default();
         self.timeline = None;
+        self.duration_corrections = 0;
         let mut effects = vec![self.emit_track(), self.emit_lookup(), self.emit_clock(now_ms), self.tray()];
         effects.extend(self.start_lookup(false, false));
         effects
@@ -435,6 +451,8 @@ impl Controller {
             self.lyrics = LyricsView::Loading;
             effects.push(self.emit_lyrics());
         }
+        self.lookup.searching = true;
+        effects.push(self.emit_lookup());
         effects.push(Effect::Lookup { generation: self.generation, query, force });
         effects
     }
@@ -459,6 +477,7 @@ impl Controller {
             states: outcome.states.clone(),
             pinned: outcome.pinned,
             cached: outcome.cached,
+            searching: false,
         };
         self.raw = outcome.result;
         let mut effects = self.apply_raw(ops, now_ms);
@@ -587,6 +606,7 @@ impl Controller {
         let saved = ops.pin(&query, &candidate.result);
         self.raw = Some(candidate.result);
         self.lookup.pinned = saved;
+        self.lookup.searching = false;
         for summary in &mut self.lookup.candidates {
             summary.chosen = summary.source == source;
         }
@@ -625,6 +645,7 @@ impl Controller {
         let saved = ops.pin(&query, &result);
         self.raw = Some(result);
         self.lookup.pinned = saved;
+        self.lookup.searching = false;
         for summary in &mut self.lookup.candidates {
             summary.chosen = false;
         }
@@ -929,11 +950,21 @@ mod tests {
         c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
         c.on_lookup_finished(1, LookupOutcome { result: Some(synced()), ..Default::default() }, &Ops, 0.0);
         let effects = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 231.0)))), 1.0);
-        assert_eq!(lookups(&effects), vec![(2, false)], "a new recording key means a new lookup");
+        assert_eq!(lookups(&effects), vec![(2, false)], "the previous track's duration was corrected");
         assert!(emitted(&effects, events::LYRICS).is_empty(), "the current lyrics stay up meanwhile");
-        // Same key (sub-second jitter rounds the same): nothing to do.
-        let again = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 231.2)))), 2.0);
-        assert!(lookups(&again).is_empty());
+        // Jitter within the match tolerance keeps the recording key (offsets stay put).
+        let jitter = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 231.6)))), 2.0);
+        assert!(jitter.is_empty());
+        assert_eq!(c.query().unwrap().duration, 231.0);
+        // A duration that becomes unknown is ignored.
+        assert!(c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 0.0)))), 3.0).is_empty());
+        // A live stream's growing EndTime re-runs the lookup at most twice.
+        let mut runs = 0;
+        for (i, d) in [300.0, 400.0, 500.0, 600.0].iter().enumerate() {
+            let e = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", *d)))), 4.0 + i as f64);
+            runs += lookups(&e).len();
+        }
+        assert_eq!(runs, 1, "two corrections per track in total");
     }
 
     #[test]
@@ -967,11 +998,28 @@ mod tests {
     #[test]
     fn audio_capture_needs_the_visualiser_and_permission() {
         let mut c = Controller::new(Settings { audio_reactive: true, ..Settings::default() }, "t");
-        assert!(!c.set_windows(vec![]).contains(&Effect::SetAudio(true)), "colour background: no capture");
+        assert!(!c.set_windows(vec![]).contains(&Effect::SetAudio(true)), "no wallpaper: no capture");
+        assert!(
+            !c.set_windows(vec![("wallpaper-a".into(), "A".into())]).contains(&Effect::SetAudio(true)),
+            "colour background: no capture"
+        );
         let (_, effects) = c.update_settings(&serde_json::json!({"background": "visualizer"}), &Ops, 0.0).unwrap();
         assert!(effects.contains(&Effect::SetAudio(true)));
         let (_, effects) = c.update_settings(&serde_json::json!({"audioReactive": false}), &Ops, 0.0).unwrap();
         assert!(effects.contains(&Effect::SetAudio(false)));
+        // Covered wallpaper (pause when covered): capture stops too.
+        c.update_settings(&serde_json::json!({"audioReactive": true}), &Ops, 0.0).unwrap();
+        let effects = c.on_platform(PlatformEvent::Desktop(DesktopEvent::Coverage(vec![("A".into(), true)])), 0.0);
+        assert!(effects.contains(&Effect::SetAudio(false)));
+    }
+
+    #[test]
+    fn lookup_progress_is_reported_to_settings() {
+        let mut c = Controller::new(Settings::default(), "test");
+        let effects = c.on_platform(PlatformEvent::Media(MediaEvent::Track(Some(info("Song", 200.0)))), 0.0);
+        assert!(emitted(&effects, events::LOOKUP).iter().any(|l| l["searching"] == true));
+        let done = c.on_lookup_finished(1, LookupOutcome { result: Some(synced()), ..Default::default() }, &Ops, 0.0);
+        assert_eq!(emitted(&done, events::LOOKUP)[0]["searching"], false);
     }
 
     #[test]

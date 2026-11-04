@@ -135,7 +135,7 @@ export class GradientBackground {
   }
 
   private createProgram(): Program | null {
-    const gl = this.canvas.getContext("webgl", { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true, powerPreference: "low-power" });
+    const gl = this.canvas.getContext("webgl", { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: "low-power" });
     if (!gl) return null;
     const compile = (type: number, source: string) => {
       const shader = gl.createShader(type);

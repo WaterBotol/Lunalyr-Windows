@@ -160,7 +160,7 @@ pub fn parse_lyricsfile(text: &str) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timing::{precision, valid_word_timing, MIXED_TIMING};
+    use crate::timing::{precision, valid_word_timing, MIXED_TIMING, WORD_BY_WORD};
 
     const SAMPLE: &str = r#"version: '1.0'
 metadata:
@@ -252,6 +252,58 @@ lines:
         assert!(parse_lyricsfile("metadata:\n  offset_ms: .inf\nlines:\n- text: a\n  start_ms: 1\n").is_empty());
         let big = format!("lines:\n- text: '{}'\n  start_ms: 1\n", "x".repeat(1_000_000));
         assert!(parse_lyricsfile(&big).is_empty());
+    }
+
+    #[test]
+    fn zero_width_space_trims_like_foundation_whitespace() {
+        let doc = "lines:\n- text: Hold on\n  start_ms: 1000\n  end_ms: 3000\n  words:\n  - text: Hold\n    start_ms: 1000\n    end_ms: 2000\n  - text: \"\\u200Bon\"\n    start_ms: 2000\n    end_ms: 3000\n- text: \"\\u200B\"\n  start_ms: 3000\n  end_ms: 5000\n";
+        let lines = parse_lyricsfile(doc);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].word_timed, "the word label trims to \"on\", so the words spell the row");
+        assert_eq!(lines[0].words[1].text, "on");
+        assert!(lines[1].is_instrumental);
+        assert_eq!(precision(&lines), WORD_BY_WORD);
+    }
+
+    /// LRCLIB serves any published lyricsfile as-is. Hostile nesting must
+    /// give no lines instead of overflowing the stack (an uncatchable abort);
+    /// tokio workers have 2 MiB, this thread a quarter of a megabyte.
+    #[test]
+    fn deeply_nested_documents_give_nothing_on_a_small_stack() {
+        let documents = vec![
+            "lines:\n".to_string() + &"- ".repeat(5_000) + "x",
+            "lines: ".to_string() + &"[".repeat(10_000),
+            "lines: ".to_string() + &"&a ".repeat(10_000) + "x",
+            // The same at the 1 MB size limit.
+            "lines:\n".to_string() + &"- ".repeat(499_990) + "x",
+            "lines: ".to_string() + &"[".repeat(999_990),
+            "lines: ".to_string() + &"&a ".repeat(333_330) + "x",
+            "lines: ".to_string() + &"{a: ".repeat(249_990),
+            "&a\n".repeat(333_000) + "x",
+            (0..1_400).map(|i| format!("{}a:\n", " ".repeat(i))).collect(),
+        ];
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                for document in documents {
+                    assert!(document.len() <= MAX_LYRICSFILE_BYTES);
+                    assert!(parse_lyricsfile(&document).is_empty(), "{}", &document[..40]);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn long_documents_still_parse() {
+        let mut doc = String::from("metadata:\n  offset_ms: 0\nlines:\n");
+        for i in 0..2_000 {
+            doc.push_str(&format!("- text: Line {i}\n  start_ms: {}\n  end_ms: {}\n", i * 1000, i * 1000 + 900));
+        }
+        let lines = parse_lyricsfile(&doc);
+        assert_eq!(lines.len(), 2_000, "the nesting limit is per level, not per entry");
+        assert_eq!(lines[1_999].text, "Line 1999");
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl LookupReport {
             states: self.states.clone(),
             pinned: self.pinned,
             cached: self.cached,
+            searching: false,
         }
     }
 }

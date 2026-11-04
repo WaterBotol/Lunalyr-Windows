@@ -56,10 +56,11 @@ use ::windows::Win32::Graphics::Gdi::{
 use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetWindow, GetWindowLongPtrW, IsWindow, IsWindowVisible,
-    SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, GA_PARENT,
-    GWL_EXSTYLE, GWL_STYLE, GW_HWNDLAST, GW_HWNDNEXT, HWND_BOTTOM, LWA_ALPHA, MONITORINFOF_PRIMARY, SMTO_NORMAL,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_LONG_PTR_INDEX,
+    EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+    IsWindow, IsWindowVisible, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, GW_HWNDLAST, GW_HWNDNEXT, HWND_BOTTOM, LWA_ALPHA,
+    MONITORINFOF_PRIMARY, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOWNA, WINDOW_LONG_PTR_INDEX,
 };
 
 use super::util::{self, hwnd, raw, PerMonitorDpi};
@@ -85,11 +86,7 @@ struct Layer {
 
 impl Layer {
     fn parent(&self) -> isize {
-        if self.raised {
-            self.progman
-        } else {
-            self.workerw
-        }
+        logic::wallpaper_parent(self.progman, self.workerw, self.raised)
     }
 
     fn alive(&self) -> bool {
@@ -137,7 +134,11 @@ impl WallpaperHost {
                     );
                 }
                 self.layer = Some(layer);
-                util::watch_shell_windows(&[layer.progman, layer.workerw]);
+                // Only windows that take ours with them. On the raised
+                // desktop Explorer replaces its WorkerW (our sibling) on
+                // every background change; `is_attached` then reports the
+                // layer gone and the shell re-attaches below the new one.
+                util::watch_shell_windows(&logic::watched_shell_windows(layer.progman, layer.workerw, layer.raised));
                 if layer.raised {
                     unsafe { keep_workerw_last(&layer) };
                 }
@@ -378,9 +379,12 @@ unsafe fn find_layer(progman: HWND) -> PlatformResult<Layer> {
         log::debug!("wallpaper: Progman looks raised but SHELLDLL_DefView is not its child; trying the legacy layout");
     }
 
-    // Legacy: the top-level window that holds SHELLDLL_DefView, then the next
-    // WorkerW after it in z-order.
-    let mut found = IconLayer::default();
+    // Legacy: Explorer's top-level window that holds SHELLDLL_DefView, then
+    // the next WorkerW after it in z-order. Other apps' top-level windows
+    // can host a shell view too (the legacy Explorer-style Open/Save dialog)
+    // and sit above the desktop, so both must belong to Progman's process.
+    let explorer_pid = process_id(progman);
+    let mut found = IconLayer { progman: raw(progman), explorer_pid, ..IconLayer::default() };
     let _ = EnumWindows(Some(find_icon_layer), LPARAM(&mut found as *mut IconLayer as isize));
     if found.top == 0 {
         return Err(PlatformError::msg("the desktop icon layer (SHELLDLL_DefView) was not found"));
@@ -392,25 +396,40 @@ unsafe fn find_layer(progman: HWND) -> PlatformResult<Layer> {
     }
     let workerw = FindWindowExW(None, Some(hwnd(found.top)), w!("WorkerW"), PCWSTR::null())
         .map_err(|_| PlatformError::msg("the wallpaper WorkerW behind the desktop icons was not found"))?;
+    if process_id(workerw) != explorer_pid {
+        return Err(PlatformError::msg("the WorkerW behind the desktop icons does not belong to Explorer"));
+    }
     Ok(Layer { progman: raw(progman), defview: found.defview, workerw: raw(workerw), raised: false })
+}
+
+unsafe fn process_id(window: HWND) -> u32 {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(window, Some(&mut pid));
+    pid
 }
 
 #[derive(Default)]
 struct IconLayer {
+    progman: isize,
+    explorer_pid: u32,
     top: isize,
     defview: isize,
 }
 
+/// Stops at the first (topmost) of Explorer's desktop windows with a
+/// SHELLDLL_DefView child, skipping other apps' shell views.
 unsafe extern "system" fn find_icon_layer(window: HWND, data: LPARAM) -> BOOL {
     let Some(found) = (data.0 as *mut IconLayer).as_mut() else { return FALSE };
-    match FindWindowExW(Some(window), None, w!("SHELLDLL_DefView"), PCWSTR::null()) {
-        Ok(defview) => {
-            found.top = raw(window);
-            found.defview = raw(defview);
-            FALSE
-        }
-        Err(_) => TRUE,
+    let Ok(defview) = FindWindowExW(Some(window), None, w!("SHELLDLL_DefView"), PCWSTR::null()) else {
+        return TRUE;
+    };
+    let is_progman = raw(window) == found.progman;
+    if !logic::is_desktop_icon_host(is_progman, &util::class_name(window), process_id(window), found.explorer_pid) {
+        return TRUE;
     }
+    found.top = raw(window);
+    found.defview = raw(defview);
+    FALSE
 }
 
 /// Every monitor in physical pixels, primary first, then left to right.

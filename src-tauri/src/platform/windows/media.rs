@@ -6,8 +6,10 @@
 //! coalesces bursts (~150 ms), re-reads the current session and emits
 //! de-duplicated [`MediaEvent`]s. Every 2.5 s it re-samples the timeline
 //! (some players only update it on seek) and re-checks which session is
-//! current. Sessions can vanish mid-call: every failure is logged and
-//! retried on the next signal or tick, never unwrapped.
+//! current. The anchor ([`TimelineAnchor`]) is reset when the session
+//! changes and re-derived when the recording changes. Sessions can vanish
+//! mid-call: every failure is logged and retried on the next signal or tick,
+//! never unwrapped.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -315,9 +317,21 @@ impl Media {
             return;
         };
         self.nothing_at = None;
+        let now = now_ms();
+        // Only a different song re-anchors the timeline: players often fill in
+        // the album or artist after the title, and that must not reset a valid
+        // stamped position to 0.
+        let new_song = logic::is_new_song(self.sent_track.as_ref(), &info);
         self.send_track(Some(info.clone()));
+        if new_song {
+            // Also when the timeline could not be read this time: a session
+            // without a timeline (or one updated only on seek) reports the
+            // same sample for every track, which must not keep the previous
+            // track's anchor.
+            self.anchor.forget_sample(now);
+        }
         if let Some(raw) = timeline {
-            let sample = self.anchor.update(raw, now_ms(), self.playback_event_ms);
+            let sample = self.anchor.update(raw, now, self.playback_event_ms);
             self.send(MediaEvent::Timeline(sample));
         }
         let thumbnail = self.props.as_ref().and_then(|props| props.thumbnail.clone());

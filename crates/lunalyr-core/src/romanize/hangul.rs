@@ -2,7 +2,8 @@
 //!
 //! Syllables are decomposed into initial / vowel / final jamo. Within a
 //! run of syllables the sound changes RR writes are applied: liaison of a
-//! final consonant into a following ㅇ (읽어 ilgeo, 없어 eopseo, 좋아 joa),
+//! final consonant into a following ㅇ (읽어 ilgeo, 없어 eopseo, 좋아 joa;
+//! a final ㅇ never moves: 사랑을 sarangeul),
 //! palatalisation (같이 gachi), nasalisation (합니다 hamnida, 독립 dongnip),
 //! lateralisation (신라 silla, 설날 seollal), ㄹ → n after other nasals
 //! (종로 jongno) and aspiration with ㅎ (좋고 joko, 축하 chuka).
@@ -58,12 +59,13 @@ fn liaison(final_index: usize) -> (Coda, Option<usize>) {
         18 => (Coda::P, Some(S)),
         19 => (Coda::None, Some(S)),
         20 => (Coda::None, Some(SS)),
+        21 => (Coda::Ng, None), // ㅇ stays as "ng"; nothing moves
         22 => (Coda::None, Some(J)),
         23 => (Coda::None, Some(CH)),
         24 => (Coda::None, Some(K)),
         25 => (Coda::None, Some(T)),
         26 => (Coda::None, Some(P)),
-        _ => (Coda::None, None), // ㅎ is silent before a vowel
+        _ => (Coda::None, None), // 27 ㅎ is silent before a vowel (0 never reaches here)
     }
 }
 
@@ -274,6 +276,21 @@ mod tests {
         assert_eq!(hangul_to_latin("굳이"), "guji");
         assert_eq!(hangul_to_latin("음악"), "eumak");
         assert_eq!(hangul_to_latin("한국어"), "hangugeo");
+    }
+
+    #[test]
+    fn final_ieung_stays_before_a_vowel() {
+        // Revised Romanization (and ICU Hangul-Latin on macOS) keep "ng".
+        assert_eq!(hangul_to_latin("사랑을"), "sarangeul");
+        assert_eq!(hangul_to_latin("사랑이"), "sarangi");
+        assert_eq!(hangul_to_latin("영원히"), "yeongwonhi");
+        assert_eq!(hangul_to_latin("고양이"), "goyangi");
+        assert_eq!(hangul_to_latin("방에"), "bange");
+        assert_eq!(hangul_to_latin("생일"), "saengil");
+        assert_eq!(hangul_to_latin("강아지"), "gangaji");
+        assert_eq!(hangul_to_latin("공원"), "gongwon");
+        assert_eq!(hangul_to_latin("영어"), "yeongeo");
+        assert_eq!(hangul_to_latin("종이"), "jongi");
     }
 
     #[test]

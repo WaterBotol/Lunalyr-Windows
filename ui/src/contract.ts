@@ -107,6 +107,8 @@ export interface LookupInfo {
   states: [SourceId, string][];
   pinned: boolean;
   cached: boolean;
+  /** A lookup is running (show progress in Settings; the wallpaper keeps its lyrics during a refresh). */
+  searching: boolean;
 }
 
 export interface AudioFrame {
@@ -181,6 +183,17 @@ export interface Settings {
   songOffsets: Record<string, number>;
 }
 
+/** Licence files installed with the app (`licenses/` in its resource folder). */
+export type LicenceFile =
+  | "LICENSE.txt"
+  | "THIRD_PARTY_NOTICES.md"
+  | "Manrope-OFL.txt"
+  | "Wavefield-LICENSE.txt"
+  | "Wavefield-Web-Dependencies-LICENSE.txt";
+
+/** `open_link` targets: this project, Lunalyr for macOS, upstream Verso, or an installed licence file. */
+export type LinkTarget = "project" | "mac" | "upstream" | `license:${LicenceFile}`;
+
 export interface Snapshot {
   track: TrackPayload;
   lyrics: LyricsView;
@@ -223,4 +236,6 @@ export const COMMANDS = {
   openSettings: "open_settings",
   /** ({ paused: boolean }) -> void — user pause of all wallpapers */
   setUserPaused: "set_user_paused",
+  /** ({ target: LinkTarget }) -> void — opens a fixed link in the browser or an installed licence file outside the app */
+  openLink: "open_link",
 } as const;

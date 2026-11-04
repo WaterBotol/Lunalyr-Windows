@@ -32,6 +32,9 @@ export interface RendererOptions {
   ambientPhase?: number;
 }
 
+/** A still frame is painted from a timer if no animation frame arrives first (rAF can stall behind the desktop icons). */
+const STILL_FALLBACK_MS = 100;
+
 export class WallpaperRenderer {
   readonly root: HTMLDivElement;
   private readonly background: GradientBackground;
@@ -49,16 +52,28 @@ export class WallpaperRenderer {
   private unsubscribe: (() => void) | null = null;
   private scrimKey = "";
   private readonly onResize = () => this.resize();
-  private readonly onVisibility = () => this.updateActive();
-  private readonly onFonts = () => this.scene.invalidate();
-  private readonly onReduced = () => this.renderSoon();
+  private readonly onVisibility = () => {
+    this.updateActive();
+    this.repaint();
+  };
+  /** Lines measured with a fallback face are rebuilt, and a paused wallpaper repaints them. */
+  private readonly onFonts = () => {
+    this.scene.invalidate();
+    this.repaint();
+  };
+  private readonly onReduced = () => this.repaint();
+  /** Something on screen changed outside the store (fonts, the visualiser engine). */
+  private readonly repaint = () => {
+    if (!this.loop.running) this.renderSoon();
+  };
 
   constructor(container: HTMLElement, private readonly store: Store, options: RendererOptions = {}) {
     this.now = options.now ?? Date.now;
     this.ambient = new VisualClock(options.ambientPhase ?? 0);
     this.root = el("div", "ll-root", container);
     this.background = new GradientBackground(this.root);
-    this.visualizer = new VisualizerLayer(this.root);
+    // Wavefield ready or failed: the engine or the colour field now draws.
+    this.visualizer = new VisualizerLayer(this.root, this.repaint);
     this.scrim = el("div", "ll-scrim", this.root);
     this.scene = new LyricScene(this.root);
     this.loop = new FrameLoop((now) => this.frame(now));
@@ -84,6 +99,7 @@ export class WallpaperRenderer {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.loop.setActive(false);
+    this.cancelStill();
     window.removeEventListener("resize", this.onResize);
     document.removeEventListener("visibilitychange", this.onVisibility);
     document.fonts?.removeEventListener?.("loadingdone", this.onFonts);
@@ -145,22 +161,38 @@ export class WallpaperRenderer {
     const paused = this.store.state.render.paused || document.hidden;
     this.loop.setActive(!paused);
     this.visualizer.setPaused(paused);
+    if (this.loop.running || !this.stillAllowed()) this.cancelStill();
   }
 
-  private pendingStill = false;
+  private still: { frame: number; timer: ReturnType<typeof setTimeout> } | null = null;
+
   /**
    * While the user has paused the wallpaper it is still on screen, so a state
-   * change repaints one still frame. Covered or locked wallpapers draw nothing
-   * until they resume (the loop then renders at once).
+   * change repaints one still frame: on the next animation frame, or from a
+   * timer when the host has stopped animation frames (behind the desktop
+   * icons). Covered, locked or hidden wallpapers draw nothing until they
+   * resume (the loop then renders at once).
    */
   private renderSoon(): void {
+    if (this.still || !this.unsubscribe || !this.stillAllowed()) return;
+    const paint = () => {
+      this.cancelStill();
+      if (!this.loop.running && this.unsubscribe && this.stillAllowed()) this.frame(performance.now());
+    };
+    this.still = { frame: requestAnimationFrame(paint), timer: setTimeout(paint, STILL_FALLBACK_MS) };
+  }
+
+  private cancelStill(): void {
+    if (!this.still) return;
+    cancelAnimationFrame(this.still.frame);
+    clearTimeout(this.still.timer);
+    this.still = null;
+  }
+
+  /** Only the user's own pause leaves the wallpaper on screen to repaint. */
+  private stillAllowed(): boolean {
     const render = this.store.state.render;
-    if (this.pendingStill || document.hidden || (render.paused && render.reason !== "user")) return;
-    this.pendingStill = true;
-    requestAnimationFrame(() => {
-      this.pendingStill = false;
-      if (!this.loop.running) this.frame(performance.now());
-    });
+    return !document.hidden && (!render.paused || render.reason === "user");
   }
 
   private reduced(): boolean {

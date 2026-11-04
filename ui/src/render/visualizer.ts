@@ -209,7 +209,8 @@ class WavefieldView {
   private gradient = "";
   private failed = false;
 
-  constructor(parent: HTMLElement) {
+  /** `onChange`: the engine became ready or failed, so what the wallpaper shows changes. */
+  constructor(parent: HTMLElement, private readonly onChange: () => void) {
     this.iframe = el("iframe", "ll-wavefield", parent);
     this.iframe.title = "Visualiser";
     this.iframe.setAttribute("aria-hidden", "true");
@@ -240,6 +241,7 @@ class WavefieldView {
     this.overlay = overlay;
     this.gradient = "";
     this.ready = true;
+    this.onChange();
   }
 
   draw(frame: WavefieldFrame): void {
@@ -263,6 +265,8 @@ class WavefieldView {
     this.failed = true;
     this.iframe.style.display = "none";
     console.error("Wavefield engine:", reason);
+    // The colour field takes over.
+    this.onChange();
   }
 
   destroy(): void {
@@ -282,7 +286,11 @@ export class VisualizerLayer {
   private height = 0;
   private filterKey = "";
 
-  constructor(parent: HTMLElement) {
+  /**
+   * `onChange` is called when the Wavefield engine becomes ready or fails,
+   * so a wallpaper that is not animating can repaint its still frame.
+   */
+  constructor(parent: HTMLElement, private readonly onChange: () => void = () => undefined) {
     this.root = el("div", "ll-visualizer", parent);
     this.root.style.display = "none";
   }
@@ -311,7 +319,7 @@ export class VisualizerLayer {
       this.spectrum = null;
     }
     if (this.enabled && this.style === "wavefield") {
-      if (!this.wavefield) this.wavefield = new WavefieldView(this.root);
+      if (!this.wavefield) this.wavefield = new WavefieldView(this.root, this.onChange);
     } else if (this.wavefield) {
       this.wavefield.destroy();
       this.wavefield = null;

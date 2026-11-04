@@ -1,10 +1,11 @@
 //! Pure helpers for the Windows platform layer.
 //!
 //! Plain data in, plain data out — no Win32 types — so every decision the
-//! Windows code makes (timeline anchoring, full-screen coverage, wallpaper
-//! window styles, track de-duplication, text chunking for the phonetic
-//! analyser) is unit-tested on any host. `platform/windows/*` gathers the
-//! facts from the OS and calls these.
+//! Windows code makes (timeline anchoring, full-screen coverage, session
+//! lock, which desktop windows to trust and watch, wallpaper window styles,
+//! track de-duplication, text chunking for the phonetic analyser) is
+//! unit-tested on any host. `platform/windows/*` gathers the facts from the
+//! OS and calls these.
 
 use super::{MediaInfo, TimelineInfo};
 
@@ -50,8 +51,22 @@ pub fn same_media(a: &MediaInfo, b: &MediaInfo) -> bool {
 
 /// Same title/artist/album/player, ignoring the duration (which players often
 /// report a moment after the title).
+/// A different song (title changed, or nothing was showing): the timeline
+/// anchor starts over. Album/artist fill-ins for the same title are not.
+pub fn is_new_song(sent: Option<&Option<MediaInfo>>, next: &MediaInfo) -> bool {
+    !matches!(sent, Some(Some(sent)) if sent.title == next.title)
+}
+
 pub fn same_recording(a: &MediaInfo, b: &MediaInfo) -> bool {
     a.title == b.title && a.artist == b.artist && a.album == b.album && a.source_app == b.source_app
+}
+
+/// Does `next` start a new recording, compared with the last `Track` sent?
+/// `sent`: `None` before the first one, `Some(None)` after "nothing playing"
+/// (a title that returns after that is new again; one that returns within
+/// the grace period, before "nothing playing" was sent, is not).
+pub fn is_new_recording(sent: Option<&Option<MediaInfo>>, next: &MediaInfo) -> bool {
+    !matches!(sent, Some(Some(sent)) if same_recording(sent, next))
 }
 
 // ---- Timeline anchoring --------------------------------------------------------
@@ -82,8 +97,17 @@ const RESUME_TOLERANCE_MS: f64 = 750.0;
 /// anchor is stale.
 const OVERRUN_TOLERANCE_S: f64 = 2.0;
 /// How long after a PlaybackInfoChanged event its time still counts as the
-/// moment playback resumed.
+/// moment playback resumed (or paused).
 const RESUME_EVENT_WINDOW_MS: f64 = 5_000.0;
+/// When the recording changes, a sample that is still the one from before
+/// and older than this belongs to the previous recording: the player has not
+/// published a timeline for the new one (some only do on seek, some never).
+/// Well above the event coalescing window and the usual lag between a
+/// player's metadata and timeline updates, which arrive in either order.
+const STALE_SAMPLE_MS: f64 = 3_000.0;
+
+/// (`Position`, `LastUpdatedTime`) bits: identifies one published sample.
+type SampleKey = (u64, Option<u64>);
 
 /// Turns GSMTC timeline reads into [`TimelineInfo`] anchors the renderer can
 /// extrapolate from (`position + (now - sampled_at) * rate` while playing).
@@ -92,17 +116,61 @@ const RESUME_EVENT_WINDOW_MS: f64 = 5_000.0;
 /// periodic re-samples or lyrics would jump:
 /// * Most stamp `LastUpdatedTime` whenever they set the timeline (play,
 ///   pause, seek, track change): `position` was true at that instant.
-/// * Some do not update the timeline when they resume: the stamp predates
-///   the current play run, so the position is anchored at the resume
-///   instant instead.
+/// * Some do not update the timeline when they resume: the position held
+///   during the pause, so it is anchored at the resume instant instead.
 /// * Some never stamp it: the anchor is the first time this exact sample was
 ///   seen, and repeated identical reads keep that time.
-#[derive(Debug, Clone, Default)]
+/// * Some publish no timeline at all (Position 0, never stamped), or update
+///   it only on seek, so the sample stays the same across pauses and tracks.
+///   A pause the player does not publish freezes the position where the
+///   extrapolation had it (the renderer would otherwise jump back to the
+///   stale sample), a resume continues from there, and a new recording
+///   ([`TimelineAnchor::forget_sample`]) counts from when it was first seen.
+#[derive(Debug, Clone)]
 pub struct TimelineAnchor {
-    last_raw: Option<(u64, Option<u64>)>,
+    last_raw: Option<SampleKey>,
+    /// When the last sample was true by its own account: its
+    /// `LastUpdatedTime`, or when it was first seen.
+    sample_ms: f64,
+    /// The position reported as true at `anchor_ms`: the sample's, or one
+    /// derived from it (frozen at a pause, counted from a new recording).
+    position: f64,
     anchor_ms: f64,
+    /// Rate of the last playing read.
+    rate: f64,
+    /// The sample still belongs to the previous recording, so its duration
+    /// says nothing about this one.
+    assumed: bool,
     was_playing: Option<bool>,
     playing_since_ms: Option<f64>,
+    /// Left by `forget_sample` for the next read.
+    stale: Option<StaleSample>,
+}
+
+/// The sample that was current when the recording changed.
+#[derive(Debug, Clone, Copy)]
+struct StaleSample {
+    key: SampleKey,
+    /// Its `TimelineAnchor::sample_ms`.
+    sample_ms: f64,
+    /// When the new recording was first seen.
+    seen_ms: f64,
+}
+
+impl Default for TimelineAnchor {
+    fn default() -> Self {
+        TimelineAnchor {
+            last_raw: None,
+            sample_ms: 0.0,
+            position: 0.0,
+            anchor_ms: 0.0,
+            rate: 1.0,
+            assumed: false,
+            was_playing: None,
+            playing_since_ms: None,
+            stale: None,
+        }
+    }
 }
 
 impl TimelineAnchor {
@@ -115,53 +183,117 @@ impl TimelineAnchor {
         *self = Self::default();
     }
 
+    /// The reported recording changed at `now_ms`: a sample equal to the
+    /// last one must not keep the old anchor. The play/pause history is
+    /// kept, so a resume is still recognised. If the next read still returns
+    /// the previous recording's sample (stamped, or first seen, more than 3 s
+    /// earlier), the new recording counts from `now_ms`; a sample the player
+    /// published just before its metadata keeps its own stamp.
+    pub fn forget_sample(&mut self, now_ms: f64) {
+        self.stale = match self.last_raw.take() {
+            Some(key) => Some(StaleSample { key, sample_ms: self.sample_ms, seen_ms: now_ms }),
+            // Changed again before the next read: still the same stale sample.
+            None => self.stale.map(|stale| StaleSample { seen_ms: now_ms, ..stale }),
+        };
+        self.assumed = false;
+    }
+
     /// `now_ms`: wall clock of this read. `playback_event_ms`: when the most
-    /// recent PlaybackInfoChanged event arrived (used as the resume instant
-    /// when this read is the first to see the player playing again).
+    /// recent PlaybackInfoChanged event arrived (used as the moment playback
+    /// resumed or paused when this read is the first to see it).
     pub fn update(&mut self, raw: RawTimeline, now_ms: f64, playback_event_ms: Option<f64>) -> TimelineInfo {
         let position = if raw.position.is_finite() { raw.position.max(0.0) } else { 0.0 };
         let rate = if raw.rate.is_finite() && raw.rate > 0.0 && raw.rate <= 16.0 { raw.rate } else { 1.0 };
+        let event = playback_event_ms
+            .filter(|t| t.is_finite() && *t <= now_ms && *t >= now_ms - RESUME_EVENT_WINDOW_MS)
+            .unwrap_or(now_ms);
+        let key = (position.to_bits(), raw.last_updated_ms.map(f64::to_bits));
+        let unchanged = self.last_raw == Some(key);
+        let stale = self.stale.take();
 
-        if raw.playing {
-            if self.was_playing == Some(false) {
-                let resumed = playback_event_ms
-                    .filter(|t| t.is_finite() && *t <= now_ms && *t >= now_ms - RESUME_EVENT_WINDOW_MS)
-                    .unwrap_or(now_ms);
-                self.playing_since_ms = Some(resumed);
+        if !raw.playing && self.was_playing == Some(true) && unchanged {
+            // Paused without publishing where: the position froze where the
+            // extrapolation had it, and holds until playback resumes.
+            let paused_at = event.max(self.anchor_ms);
+            let mut frozen = self.position + (paused_at - self.anchor_ms) / 1000.0 * self.rate;
+            let duration = self.known_duration(&raw);
+            if duration > 0.0 {
+                frozen = frozen.min(duration);
             }
-        } else {
+            self.position = frozen;
+            self.anchor_ms = paused_at;
+            self.was_playing = Some(false);
+            self.playing_since_ms = None;
+            return TimelineInfo { position: frozen, sampled_at_ms: paused_at, playing: false, rate };
+        }
+
+        let resumed = raw.playing && self.was_playing == Some(false);
+        if resumed {
+            self.playing_since_ms = Some(event);
+        } else if !raw.playing {
             self.playing_since_ms = None;
         }
         self.was_playing = Some(raw.playing);
 
-        let key = (position.to_bits(), raw.last_updated_ms.map(f64::to_bits));
-        let mut anchor = if self.last_raw == Some(key) {
-            self.anchor_ms
+        let (mut shown, mut anchor) = if unchanged {
+            (self.position, self.anchor_ms)
         } else {
-            match raw.last_updated_ms {
-                Some(t) if t.is_finite() && t <= now_ms + FUTURE_TOLERANCE_MS && t >= now_ms - MAX_SAMPLE_AGE_MS => {
-                    t.min(now_ms)
+            self.assumed = false;
+            self.sample_ms = raw.last_updated_ms.filter(|t| t.is_finite()).unwrap_or(now_ms);
+            match stale {
+                Some(stale) if stale.key == key && stale.sample_ms < stale.seen_ms - STALE_SAMPLE_MS => {
+                    // The player has not published the new recording's
+                    // timeline: it started when it was first seen.
+                    self.assumed = true;
+                    (0.0, stale.seen_ms.min(now_ms))
                 }
-                _ => now_ms,
+                _ => (position, sample_anchor(raw.last_updated_ms, now_ms)),
             }
         };
         if raw.playing {
             if let Some(since) = self.playing_since_ms {
-                if anchor < since - RESUME_TOLERANCE_MS {
+                // Resumed without a new sample: the position held during the
+                // pause (however short), so it was true when playback resumed.
+                if anchor < since - RESUME_TOLERANCE_MS || (resumed && unchanged) {
                     anchor = since;
                 }
             }
-            if raw.duration > 0.0 {
-                let projected = position + (now_ms - anchor) / 1000.0 * rate;
-                if projected > raw.duration + OVERRUN_TOLERANCE_S {
+            let duration = self.known_duration(&raw);
+            if duration > 0.0 {
+                let projected = shown + (now_ms - anchor) / 1000.0 * rate;
+                if projected > duration + OVERRUN_TOLERANCE_S {
+                    shown = position;
                     anchor = now_ms;
                 }
             }
+            self.rate = rate;
         }
         let anchor = anchor.min(now_ms);
         self.last_raw = Some(key);
+        self.position = shown;
         self.anchor_ms = anchor;
-        TimelineInfo { position, sampled_at_ms: anchor, playing: raw.playing, rate }
+        TimelineInfo { position: shown, sampled_at_ms: anchor, playing: raw.playing, rate }
+    }
+
+    /// The track length to bound extrapolation by; 0 (unknown) while the
+    /// sample, and so its duration, still belongs to the previous recording.
+    fn known_duration(&self, raw: &RawTimeline) -> f64 {
+        if self.assumed || !raw.duration.is_finite() {
+            0.0
+        } else {
+            raw.duration
+        }
+    }
+}
+
+/// Where a new sample is anchored: its `LastUpdatedTime` when plausible
+/// (clamped to now), otherwise when it was first seen (this read).
+fn sample_anchor(last_updated_ms: Option<f64>, now_ms: f64) -> f64 {
+    match last_updated_ms {
+        Some(t) if t.is_finite() && t <= now_ms + FUTURE_TOLERANCE_MS && t >= now_ms - MAX_SAMPLE_AGE_MS => {
+            t.min(now_ms)
+        }
+        _ => now_ms,
     }
 }
 
@@ -273,9 +405,26 @@ pub fn can_cover(window: &WindowFacts) -> bool {
     !window.rect.is_empty()
 }
 
+/// `QUERY_USER_NOTIFICATION_STATE` values (shellapi.h) the coverage check
+/// distinguishes.
+pub mod notification_state {
+    pub const RUNNING_D3D_FULL_SCREEN: i32 = 3;
+    pub const PRESENTATION_MODE: i32 = 4;
+}
+
+/// Does this `SHQueryUserNotificationState` result mean the foreground
+/// window's monitor is covered? Only exclusive full-screen Direct3D.
+/// Presentation mode is a user toggle (Mobility Center, `presentationsettings
+/// /start`, or automatic for a remembered display) that says nothing about
+/// any window's size; a real full-screen slideshow is caught by the
+/// maximised / contains-the-monitor window check in [`coverage`].
+pub fn notification_state_covers(state: i32) -> bool {
+    state == notification_state::RUNNING_D3D_FULL_SCREEN
+}
+
 /// Per monitor: is it covered by a maximised window on it, by a window whose
-/// rectangle contains the whole monitor, or (exclusive full-screen D3D /
-/// presentation mode) is it the foreground window's monitor?
+/// rectangle contains the whole monitor, or (exclusive full-screen Direct3D,
+/// see [`notification_state_covers`]) is it the foreground window's monitor?
 pub fn coverage(monitors: &[Rect], windows: &[WindowFacts], fullscreen_monitor: Option<usize>) -> Vec<bool> {
     monitors
         .iter()
@@ -288,6 +437,55 @@ pub fn coverage(monitors: &[Rect], windows: &[WindowFacts], fullscreen_monitor: 
                 })
         })
         .collect()
+}
+
+// ---- Session lock -----------------------------------------------------------------
+
+/// `WTSINFOEX_LEVEL1_W::SessionFlags` for a locked session.
+pub const WTS_SESSIONSTATE_LOCK: i32 = 0;
+
+/// Is the session locked, by `WTSQuerySessionInformationW(WTSSessionInfoEx)`
+/// level-1 `SessionFlags`? Only an explicit WTS_SESSIONSTATE_LOCK counts:
+/// WTS_SESSIONSTATE_UNKNOWN (-1) and anything else read as unlocked, so an
+/// odd answer never pauses the wallpapers.
+pub fn session_flags_locked(session_flags: i32) -> bool {
+    session_flags == WTS_SESSIONSTATE_LOCK
+}
+
+// ---- Desktop windows ----------------------------------------------------------------
+
+/// The desktop window the wallpaper windows are children of: Progman on the
+/// raised desktop (24H2+), the empty WorkerW behind the icons otherwise.
+pub fn wallpaper_parent(progman: isize, workerw: isize, raised: bool) -> isize {
+    if raised {
+        progman
+    } else {
+        workerw
+    }
+}
+
+/// Explorer windows whose destruction takes the wallpaper windows with them
+/// (they must then be recreated): Progman and the wallpapers' parent. Not the
+/// raised desktop's WorkerW: the wallpapers are its siblings there, it does
+/// not take them along, and Explorer replaces it whenever the desktop
+/// background changes; re-attaching below the new one (the shell's watchdog)
+/// repairs that without recreating any webview.
+pub fn watched_shell_windows(progman: isize, workerw: isize, raised: bool) -> Vec<isize> {
+    let parent = wallpaper_parent(progman, workerw, raised);
+    if parent == progman {
+        vec![progman]
+    } else {
+        vec![progman, parent]
+    }
+}
+
+/// Legacy layout: can this top-level window, which has a SHELLDLL_DefView
+/// child, be Explorer's desktop icon layer? Only Progman itself or a WorkerW
+/// of Progman's process. Other apps host shell views in their own top-level
+/// windows too (the legacy Explorer-style Open/Save dialog, IShellBrowser
+/// frames), and those sit above the desktop in z-order.
+pub fn is_desktop_icon_host(is_progman: bool, class_name: &str, pid: u32, explorer_pid: u32) -> bool {
+    is_progman || (explorer_pid != 0 && pid == explorer_pid && class_name == "WorkerW")
 }
 
 // ---- Wallpaper window styles ------------------------------------------------------
@@ -552,6 +750,155 @@ mod tests {
         assert_eq!(anchor.update(sample, 4.0, None).position, 0.0);
     }
 
+    /// What the renderer shows at `now_ms` for this anchor.
+    fn shown(t: TimelineInfo, now_ms: f64) -> f64 {
+        t.position + if t.playing { (now_ms - t.sampled_at_ms) / 1000.0 * t.rate } else { 0.0 }
+    }
+
+    /// A session that publishes no timeline: Position 0, never stamped, no
+    /// duration (Firefox before 125, for one).
+    fn untimed(playing: bool) -> RawTimeline {
+        RawTimeline { position: 0.0, last_updated_ms: None, playing, rate: 1.0, duration: 0.0 }
+    }
+
+    #[test]
+    fn only_a_new_title_re_anchors_the_timeline() {
+        let mut a = info("A", 200.0);
+        assert!(is_new_song(None, &a));
+        assert!(is_new_song(Some(&None), &a));
+        let sent = Some(a.clone());
+        a.album = Some("Late album".into());
+        assert!(!is_new_song(Some(&sent), &a), "album filled in later: same song");
+        assert!(is_new_song(Some(&sent), &info("B", 200.0)));
+    }
+
+    #[test]
+    fn new_recording_decisions() {
+        let a = info("A", 200.0);
+        assert!(is_new_recording(None, &a), "nothing sent yet");
+        assert!(is_new_recording(Some(&None), &a), "after a Track(None) gap, even the same title");
+        assert!(is_new_recording(Some(&Some(info("B", 200.0))), &a));
+        assert!(!is_new_recording(Some(&Some(info("A", 0.0))), &a), "a duration update is the same recording");
+    }
+
+    #[test]
+    fn a_new_recording_without_a_timeline_counts_from_its_first_sighting() {
+        let t0 = 1_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        assert_eq!(anchor.update(untimed(true), t0, None).sampled_at_ms, t0);
+        let t = anchor.update(untimed(true), t0 + 207_500.0, None);
+        assert_eq!(shown(t, t0 + 210_000.0), 210.0);
+        // The next track in the same session, gapless (no paused read in
+        // between); the reads look exactly as before.
+        let t1 = t0 + 210_000.0;
+        anchor.forget_sample(t1);
+        let t = anchor.update(untimed(true), t1 + 150.0, None);
+        assert_eq!((t.position, t.sampled_at_ms, t.playing), (0.0, t1, true));
+        assert_eq!(shown(t, t1 + 1_000.0), 1.0);
+        // Re-samples keep counting from there.
+        assert_eq!(anchor.update(untimed(true), t1 + 2_650.0, None).sampled_at_ms, t1);
+        // After a Track(None) gap (also a new recording) and when re-sampled
+        // right away, it is the read time.
+        let t2 = t1 + 300_000.0;
+        anchor.forget_sample(t2);
+        assert_eq!(anchor.update(untimed(true), t2, None).sampled_at_ms, t2);
+    }
+
+    #[test]
+    fn a_timeline_published_before_the_metadata_keeps_its_stamp() {
+        let tb = 2_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        anchor.update(raw(95.0, Some(tb - 120_000.0), true), tb - 2_000.0, None);
+        // The player stamps the next track's start, and its title follows
+        // 600 ms later.
+        anchor.update(raw(0.0, Some(tb), true), tb + 100.0, None);
+        anchor.forget_sample(tb + 600.0);
+        let t = anchor.update(raw(0.0, Some(tb), true), tb + 600.0, None);
+        assert_eq!((t.position, t.sampled_at_ms), (0.0, tb));
+    }
+
+    #[test]
+    fn a_new_recording_ignores_the_previous_tracks_stale_sample() {
+        // A player that updates its timeline only on seek: the last seek in
+        // the previous track (95 s, two minutes ago) is still what it reports.
+        let seek = 3_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        anchor.update(raw(95.0, Some(seek), true), seek + 50.0, None);
+        let next = seek + 120_000.0;
+        anchor.forget_sample(next);
+        let t = anchor.update(raw(95.0, Some(seek), true), next + 150.0, None);
+        assert_eq!((t.position, t.sampled_at_ms), (0.0, next));
+        // The stale sample's duration (300 s, the previous track's) does not
+        // cut the new one short.
+        let t = anchor.update(raw(95.0, Some(seek), true), next + 400_000.0, None);
+        assert_eq!((t.position, t.sampled_at_ms), (0.0, next));
+        // Another track change before any fresh sample: counts from that one.
+        let third = next + 450_000.0;
+        anchor.forget_sample(third);
+        let t = anchor.update(raw(95.0, Some(seek), true), third + 150.0, None);
+        assert_eq!((t.position, t.sampled_at_ms), (0.0, third));
+        // A seek publishes a fresh sample, which is used as is.
+        let t = anchor.update(raw(30.0, Some(third + 9_000.0), true), third + 9_100.0, None);
+        assert_eq!((t.position, t.sampled_at_ms), (30.0, third + 9_000.0));
+    }
+
+    #[test]
+    fn pause_and_resume_without_a_timeline_keep_the_position() {
+        let t0 = 1_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        anchor.update(untimed(true), t0, None);
+        anchor.update(untimed(true), t0 + 57_500.0, None);
+        // Paused at +60 s (event), read 150 ms later: the sample is
+        // unchanged, so the position freezes where it had got to.
+        let t = anchor.update(untimed(false), t0 + 60_150.0, Some(t0 + 60_000.0));
+        assert!(!t.playing);
+        assert_eq!(shown(t, t0 + 60_150.0), 60.0);
+        let t = anchor.update(untimed(false), t0 + 62_650.0, None);
+        assert_eq!(shown(t, t0 + 62_650.0), 60.0, "re-sampled while paused");
+        // Resumed at +90 s: continues from 60 s.
+        let t = anchor.update(untimed(true), t0 + 90_150.0, Some(t0 + 90_000.0));
+        assert!((shown(t, t0 + 90_150.0) - 60.15).abs() < 1e-9);
+        assert!((shown(t, t0 + 100_000.0) - 70.0).abs() < 1e-9);
+        // A second pause, shorter than the resume tolerance.
+        let t = anchor.update(untimed(false), t0 + 100_150.0, Some(t0 + 100_000.0));
+        assert!((shown(t, t0 + 100_150.0) - 70.0).abs() < 1e-9);
+        let t = anchor.update(untimed(true), t0 + 100_550.0, Some(t0 + 100_400.0));
+        assert!((shown(t, t0 + 100_550.0) - 70.15).abs() < 1e-9);
+        let t = anchor.update(untimed(true), t0 + 103_000.0, None);
+        assert!((shown(t, t0 + 110_400.0) - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pause_read_before_the_player_publishes_it_is_extrapolated_then_replaced() {
+        let t0 = 1_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        anchor.update(raw(10.0, Some(t0), true), t0 + 100.0, None);
+        // The pause event arrives first; the timeline still says 10 s at t0.
+        let t = anchor.update(raw(10.0, Some(t0), false), t0 + 5_150.0, Some(t0 + 5_000.0));
+        assert_eq!((t.position, t.sampled_at_ms, t.playing), (15.0, t0 + 5_000.0, false));
+        // Then the player publishes where it paused: that wins.
+        let t = anchor.update(raw(15.02, Some(t0 + 5_010.0), false), t0 + 5_300.0, None);
+        assert_eq!((t.position, t.sampled_at_ms, t.playing), (15.02, t0 + 5_010.0, false));
+        // Resumed without a new sample: from the published position.
+        let t = anchor.update(raw(15.02, Some(t0 + 5_010.0), true), t0 + 8_150.0, Some(t0 + 8_000.0));
+        assert_eq!((t.position, t.sampled_at_ms), (15.02, t0 + 8_000.0));
+        // A pause the extrapolation runs past the end of is held at the end.
+        anchor.update(raw(290.0, Some(t0 + 9_000.0), true), t0 + 9_100.0, None);
+        let t = anchor.update(raw(290.0, Some(t0 + 9_000.0), false), t0 + 21_000.0, Some(t0 + 20_000.0));
+        assert_eq!(t.position, 300.0);
+    }
+
+    #[test]
+    fn a_short_pause_resumes_from_the_published_position() {
+        let t0 = 1_000_000.0;
+        let mut anchor = TimelineAnchor::new();
+        anchor.update(raw(40.0, Some(t0), true), t0 + 50.0, None);
+        anchor.update(raw(40.5, Some(t0 + 500.0), false), t0 + 650.0, Some(t0 + 500.0));
+        // Resumed 300 ms later without a new stamp: 40.5 s at the resume.
+        let t = anchor.update(raw(40.5, Some(t0 + 500.0), true), t0 + 950.0, Some(t0 + 800.0));
+        assert_eq!((t.position, t.sampled_at_ms), (40.5, t0 + 800.0));
+    }
+
     fn window(rect: Rect) -> WindowFacts {
         WindowFacts {
             class_name: "Chrome_WidgetWin_1".into(),
@@ -579,6 +926,48 @@ mod tests {
         assert_eq!(coverage(&monitors, &[window(Rect::new(100, 100, 900, 700))], None), vec![false, false]);
         // Exclusive full-screen reported by the shell.
         assert_eq!(coverage(&monitors, &[], Some(1)), vec![false, true]);
+    }
+
+    #[test]
+    fn only_exclusive_fullscreen_covers_the_foreground_monitor() {
+        assert!(notification_state_covers(notification_state::RUNNING_D3D_FULL_SCREEN));
+        // Presentation settings are a user toggle, not a full-screen window.
+        assert!(!notification_state_covers(notification_state::PRESENTATION_MODE));
+        // QUNS_NOT_PRESENT, QUNS_BUSY, QUNS_ACCEPTS_NOTIFICATIONS, QUNS_QUIET_TIME, QUNS_APP.
+        for state in [1, 2, 5, 6, 7] {
+            assert!(!notification_state_covers(state), "{state}");
+        }
+    }
+
+    #[test]
+    fn session_lock_flags() {
+        assert!(session_flags_locked(WTS_SESSIONSTATE_LOCK));
+        assert!(!session_flags_locked(1), "WTS_SESSIONSTATE_UNLOCK");
+        assert!(!session_flags_locked(-1), "WTS_SESSIONSTATE_UNKNOWN is not a lock");
+    }
+
+    #[test]
+    fn raised_desktop_watches_only_progman() {
+        let (progman, workerw) = (0x100, 0x200);
+        // Raised (24H2+): the wallpapers are Progman's children; Explorer's
+        // WorkerW is a sibling it replaces on every background change.
+        assert_eq!(wallpaper_parent(progman, workerw, true), progman);
+        assert_eq!(watched_shell_windows(progman, workerw, true), vec![progman]);
+        // Legacy: the WorkerW is their parent.
+        assert_eq!(wallpaper_parent(progman, workerw, false), workerw);
+        assert_eq!(watched_shell_windows(progman, workerw, false), vec![progman, workerw]);
+    }
+
+    #[test]
+    fn only_explorers_desktop_hosts_the_icon_layer() {
+        let explorer = 4_242;
+        assert!(is_desktop_icon_host(true, "Progman", explorer, explorer));
+        assert!(is_desktop_icon_host(false, "WorkerW", explorer, explorer));
+        // The legacy Explorer-style Open/Save dialog of another app.
+        assert!(!is_desktop_icon_host(false, "#32770", 777, explorer));
+        assert!(!is_desktop_icon_host(false, "WorkerW", 777, explorer), "another process's WorkerW");
+        assert!(!is_desktop_icon_host(false, "CabinetWClass", explorer, explorer), "a File Explorer window");
+        assert!(!is_desktop_icon_host(false, "WorkerW", 0, 0), "Explorer's process unknown");
     }
 
     #[test]

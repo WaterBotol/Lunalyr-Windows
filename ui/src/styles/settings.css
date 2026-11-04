@@ -262,12 +262,13 @@ button,
   justify-content: center;
 }
 
-button:hover:not(:disabled),
+button:hover:not(:disabled):not([aria-disabled="true"]),
 .button:hover {
   background: var(--hover);
 }
 
 button:disabled,
+button[aria-disabled="true"],
 .button[aria-disabled] {
   opacity: 0.5;
   cursor: default;
@@ -507,6 +508,34 @@ a {
   color: var(--accent);
 }
 
+/* Links out of the app are buttons inside Tauri (they call open_link). */
+button.link {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  text-align: inherit;
+}
+
+button.link:hover:not(:disabled) {
+  background: none;
+}
+
+.licences {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.licences li {
+  padding: 7px 0;
+  border-top: 1px solid var(--card-border);
+}
+
 @media (max-width: 720px) {
   body {
     grid-template-columns: 1fr;
@@ -536,5 +565,9 @@ a {
 
   .nav-item[aria-current="page"] {
     outline: 1px solid Highlight;
+  }
+
+  button.link {
+    color: LinkText;
   }
 }

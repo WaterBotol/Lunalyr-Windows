@@ -82,7 +82,11 @@ pub fn build_url(base: &str, parameters: &[(&str, &str)]) -> String {
 }
 
 /// reqwest-backed client. Sends gzip `Accept-Encoding` and inflates
-/// transparently; caps bodies at [`MAX_BODY_BYTES`].
+/// transparently; caps bodies at [`MAX_BODY_BYTES`]. Goes through the
+/// system proxy: `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`, else the
+/// Windows Internet Settings proxy (`ProxyEnable`, `ProxyServer`,
+/// `ProxyOverride`; macOS: the network configuration), read once by
+/// [`ReqwestClient::new`]. PAC scripts and WPAD are not evaluated.
 #[derive(Debug, Clone)]
 pub struct ReqwestClient {
     client: reqwest::Client,

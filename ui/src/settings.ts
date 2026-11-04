@@ -3,10 +3,12 @@
 // its settings with an open demo.html over a BroadcastChannel.
 
 import { createBridge, type Bridge } from "./bridge";
-import type { CandidateSummary, Composition, FontChoice, MatchMode, NoLyricsBehaviour, ReadingDisplay, Settings, SourceId, SourceSettings } from "./contract";
+import type { CandidateSummary, Composition, FontChoice, LicenceFile, LinkTarget, MatchMode, NoLyricsBehaviour, ReadingDisplay, Settings, SourceId, SourceSettings } from "./contract";
 import { COMMANDS, EVENTS } from "./contract";
 import { defaultSettings, SETTING_RANGES, SOURCE_IDS, SOURCE_TIMING, SOURCE_TITLES } from "./defaults";
+import { demoHref } from "./links";
 import { button, choice, h, percent, section, seconds, select, slider, toggle, type Binder, type Refresher } from "./settings/controls";
+import { errorText, lookupStatus, pausedByUser } from "./settings/status";
 import { songOffsetKey } from "./sha256";
 import { connectStore, Store, type Change } from "./store";
 import "./styles/settings.css";
@@ -36,6 +38,7 @@ const FONT_OPTIONS: [FontChoice, string][] = [
 class SettingsApp {
   private readonly refreshers: Refresher[] = [];
   private readonly lookupRefreshers: (() => void)[] = [];
+  private readonly renderRefreshers: (() => void)[] = [];
   private readonly binder: Binder;
   private page: PageId = "wallpaper";
   private readonly pages = new Map<PageId, HTMLElement>();
@@ -56,7 +59,7 @@ class SettingsApp {
       const result = await this.bridge.invoke<Settings>(COMMANDS.updateSettings, { patch });
       if (result && typeof result === "object") this.store.applyEvent(EVENTS.settings, result);
     } catch (error) {
-      this.toast(`Couldn’t save that setting: ${String(error)}`);
+      this.toast(`Couldn’t save that setting: ${errorText(error)}`);
     }
   }
 
@@ -64,8 +67,19 @@ class SettingsApp {
     try {
       return await this.bridge.invoke(name, args);
     } catch (error) {
-      this.toast(String(error));
+      this.toast(errorText(error));
       return null;
+    }
+  }
+
+  /** Runs an action whose outcome is read in `target`: its status string (or `done`), or the error. */
+  private async report(target: HTMLElement, done: string, action: () => Promise<unknown>): Promise<void> {
+    target.textContent = "";
+    try {
+      const result = await action();
+      target.textContent = typeof result === "string" && result.trim() ? result : done;
+    } catch (error) {
+      target.textContent = errorText(error);
     }
   }
 
@@ -119,7 +133,7 @@ class SettingsApp {
     const initial = (location.hash.replace("#", "") as PageId) || "wallpaper";
     this.show(this.pages.has(initial) ? initial : "wallpaper", false);
     this.store.subscribe((changed) => this.refresh(changed));
-    this.refresh(new Set<Change>(["settings", "lookup", "track", "lyrics"]));
+    this.refresh(new Set<Change>(["settings", "lookup", "track", "lyrics", "render"]));
   }
 
   private show(page: PageId, focus: boolean): void {
@@ -135,6 +149,7 @@ class SettingsApp {
 
   private refresh(changed: ReadonlySet<Change>): void {
     if (changed.has("settings")) for (const r of this.refreshers) r(this.store.state.settings);
+    if (changed.has("render")) for (const r of this.renderRefreshers) r();
     if (changed.has("lookup") || changed.has("track") || changed.has("lyrics") || changed.has("settings") || changed.has("version")) {
       for (const r of this.lookupRefreshers) r();
     }
@@ -245,7 +260,7 @@ class SettingsApp {
       }
     });
     const message = h("p", { class: "help message", role: "status", "aria-live": "polite" });
-    fileInput.addEventListener("change", async () => {
+    fileInput.addEventListener("change", () => {
       const file = fileInput.files?.[0];
       fileInput.value = "";
       if (!file) return;
@@ -253,23 +268,23 @@ class SettingsApp {
         message.textContent = "That file is larger than 1 MB.";
         return;
       }
-      const text = await file.text();
-      const result = await this.command(COMMANDS.importLyrics, { text });
-      message.textContent = typeof result === "string" ? result : "Imported.";
+      void this.report(message, "Imported.", async () => this.bridge.invoke<string>(COMMANDS.importLyrics, { text: await file.text() }));
     });
-    const reload = button("Reload lyrics", async () => {
-      message.textContent = "Looking up lyrics again…";
-      await this.command(COMMANDS.reloadLyrics);
+    // Progress shows from `lookup.searching` (below), so a reload only clears the last result.
+    const reload = button("Reload lyrics", () => {
+      if (reload.getAttribute("aria-disabled") === "true") return;
+      message.textContent = "";
+      void this.command(COMMANDS.reloadLyrics);
     });
-    const forget = button("Return to automatic selection", async () => {
-      await this.command(COMMANDS.forgetSelection);
-      message.textContent = "Saved choice forgotten.";
+    const forget = button("Return to automatic selection", () => {
+      void this.report(message, "Saved choice forgotten.", () => this.bridge.invoke(COMMANDS.forgetSelection));
     });
     const controls = h("div", { class: "actions" }, reload, importLabel, fileInput);
 
     this.lookupRefreshers.push(() => {
       const state = this.store.state;
       const track = state.track.track;
+      const lookup = lookupStatus(state);
       trackBox.replaceChildren();
       if (!track) {
         trackBox.append(h("p", { class: "muted", text: "Play a song to adjust its timing or choose its lyrics." }));
@@ -282,29 +297,33 @@ class SettingsApp {
       }
       offsetRow.hidden = !track;
       reload.disabled = !track;
+      // Held while a lookup runs; aria-disabled (not `disabled`) keeps keyboard focus on it.
+      if (lookup.searching) reload.setAttribute("aria-disabled", "true");
+      else reload.removeAttribute("aria-disabled");
       importLabel.toggleAttribute("aria-disabled", !track);
       fileInput.disabled = !track;
       if (document.activeElement !== offsetInput) {
         offsetInput.value = String(this.songOffset());
         offsetValue.textContent = seconds(this.songOffset());
       }
+      // A refresh keeps the current lyrics (and their source) on screen while it searches.
       const lyrics = state.lyrics;
+      const shown = lyrics.status === "synced" || lyrics.status === "plain" ? lyrics.provenance : null;
       provenance.replaceChildren();
-      if (lyrics.status === "synced" || lyrics.status === "plain") {
+      if (shown) {
         provenance.append(
-          h("div", {}, h("span", { class: "muted", text: "Source " }), h("strong", { text: lyrics.provenance.source })),
-          h("div", {}, h("span", { class: "muted", text: "Timing " }), h("strong", { text: lyrics.provenance.precision })),
+          h("div", {}, h("span", { class: "muted", text: "Source " }), h("strong", { text: shown.source })),
+          h("div", {}, h("span", { class: "muted", text: "Timing " }), h("strong", { text: shown.precision })),
         );
-        if (lyrics.provenance.precision === "Mixed timing") {
-          provenance.append(h("p", { class: "help", text: "Some lines animate word by word. The others appear all at once because they only have a line timestamp." }));
-        }
-      } else if (track) {
-        provenance.append(h("div", { class: "muted", text: lyrics.status === "loading" ? "Looking for lyrics…" : lyrics.status === "notFound" ? "No lyrics found for this song." : "" }));
+      }
+      if (lookup.note) provenance.append(h("div", { class: "muted", text: lookup.note }));
+      if (shown?.precision === "Mixed timing") {
+        provenance.append(h("p", { class: "help", text: "Some lines animate word by word. The others appear all at once because they only have a line timestamp." }));
       }
       pinned.replaceChildren();
       if (state.lookup.pinned && track) pinned.append(h("span", { class: "badge", text: "Using your saved choice" }), forget);
       candidates.replaceChildren(...state.lookup.candidates.map((c) => this.candidateItem(c)));
-      if (state.lookup.candidates.length === 0 && track) candidates.append(h("li", { class: "muted", text: lyrics.status === "loading" ? "Searching…" : "No other matches." }));
+      if (state.lookup.candidates.length === 0 && track) candidates.append(h("li", { class: "muted", text: lookup.emptyMatches }));
     });
 
     b.watch(() => undefined);
@@ -444,9 +463,20 @@ class SettingsApp {
 
   private appPage(): HTMLElement {
     const b = this.binder;
+    // Follows the render slice: the tray menu and the demo page pause too.
     const pause = h("input", { type: "checkbox", id: "user-pause", role: "switch", class: "switch" });
-    pause.checked = this.store.state.render.paused && this.store.state.render.reason === "user";
-    pause.addEventListener("change", () => void this.command(COMMANDS.setUserPaused, { paused: pause.checked }));
+    const showPause = () => {
+      pause.checked = pausedByUser(this.store.state.render);
+    };
+    this.renderRefreshers.push(showPause);
+    pause.addEventListener("change", async () => {
+      try {
+        await this.bridge.invoke(COMMANDS.setUserPaused, { paused: pause.checked });
+      } catch (error) {
+        this.toast(errorText(error));
+        showPause();
+      }
+    });
     return h("div", {},
       section("Displays",
         choice<"all" | "primary">(b, "Show lyrics on", [
@@ -470,21 +500,44 @@ class SettingsApp {
     this.lookupRefreshers.push(() => {
       version.textContent = this.store.state.version ? `Version ${this.store.state.version}` : "";
     });
-    const link = (href: string, text: string) => h("a", { href, target: "_blank", rel: "noreferrer", text });
+    const link = (text: string, target: LinkTarget) => this.outsideLink(text, target);
+    const licence = (text: string, detail: string, file: LicenceFile) =>
+      h("li", {}, link(text, `license:${file}`), h("span", { class: "muted", text: ` — ${detail}` }));
     return h("div", {},
       section("Lunalyr for Windows",
         h("p", { text: "Desktop lyrics, in motion." }),
         version,
-        h("p", {}, link("https://github.com/WaterBotol/Lunalyr", "Project & downloads")),
+        h("p", {}, link("Project & downloads", "project")),
       ),
       section("Built on open source",
-        h("p", { class: "small", text: "A port of Lunalyr for macOS, itself based on Verso by Akki / AkkiCode06. The upstream GPLv3 with Commons Clause licence and attribution are preserved." }),
-        h("p", { class: "small" }, "Lyrics are set in Manrope (SIL Open Font License 1.1). ", link("./licenses/Manrope-OFL.txt", "Font licence")),
+        h("p", { class: "small" },
+          "A port of ", link("Lunalyr for macOS", "mac"), ", itself based on ", link("Verso", "upstream"),
+          " by Akki / AkkiCode06. The upstream GPLv3 with Commons Clause licence and attribution are preserved. Lyrics are set in Manrope; the Wavefield visualiser bundles Three.js and postprocessing."),
+        h("h3", { class: "subhead", text: "Licences" }),
+        h("ul", { class: "licences small", "aria-label": "Licences" },
+          licence("Verso licence", "GPLv3 with the Commons Clause", "LICENSE.txt"),
+          licence("Third-party notices", "attribution for everything bundled with the app", "THIRD_PARTY_NOTICES.md"),
+          licence("Manrope font licence", "SIL Open Font License 1.1", "Manrope-OFL.txt"),
+          licence("Wavefield licence", "MIT", "Wavefield-LICENSE.txt"),
+          licence("Wavefield web dependency notices", "Three.js (MIT) and postprocessing (zlib)", "Wavefield-Web-Dependencies-LICENSE.txt"),
+        ),
       ),
       section("Privacy",
         h("p", { class: "small", text: "Enabled lyric services receive song metadata. Audio analysis and readings stay on this PC." }),
       ),
     );
+  }
+
+  /**
+   * A link out of the app. A webview cannot open the browser or a file
+   * itself, so inside Tauri it asks the Rust side (`open_link`, a fixed set
+   * of targets). The browser demo uses plain links, or plain text for files
+   * it does not serve.
+   */
+  private outsideLink(text: string, target: LinkTarget): HTMLElement {
+    if (this.bridge.kind === "tauri") return button(text, () => void this.command(COMMANDS.openLink, { target }), { class: "link" });
+    const href = demoHref(target);
+    return href ? h("a", { href, target: "_blank", rel: "noreferrer", text }) : h("span", { text });
   }
 }
 

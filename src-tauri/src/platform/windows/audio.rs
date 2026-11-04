@@ -3,8 +3,10 @@
 //!
 //! One thread per [`AudioHandle`]: COM (MTA) → default render endpoint
 //! (eRender/eConsole) → shared-mode IAudioClient in loopback mode on the
-//! device mix format → IAudioCaptureClient polled every 10 ms → mono →
-//! analyser → `PlatformEvent::Audio` at ≤ 60 Hz. An IMMNotificationClient
+//! device mix format → IAudioCaptureClient polled every 10 ms → left/right
+//! (multichannel formats folded into the pair, never summed to mono, so
+//! opposite-phase content cannot cancel) → one analyser per channel, merged
+//! as on macOS → `PlatformEvent::Audio` at ≤ 60 Hz. An IMMNotificationClient
 //! restarts capture on the new device when the default output changes.
 //! Dropping the handle stops the thread within one poll interval.
 //!
@@ -34,7 +36,7 @@ use ::windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL,
 use windows_core::implement;
 
 use super::util::ComApartment;
-use crate::dsp::{self, Analyzer, SampleFormat};
+use crate::dsp::{ChannelFold, SampleFormat, StereoAnalyzer};
 use crate::platform::{AudioHandle, EventSink, PlatformError, PlatformEvent, PlatformResult};
 
 const POLL: Duration = Duration::from_millis(10);
@@ -141,22 +143,21 @@ fn capture_thread(sink: &EventSink, stop: &AtomicBool) {
         }
     };
 
-    let mut analyzer = Analyzer::new(48_000);
+    let mut analyzer = StereoAnalyzer::new(48_000);
     while !stop.load(Ordering::SeqCst) && !sink.is_closed() {
         drain(&changed_rx);
         match Capture::open(&enumerator) {
             Ok(capture) => {
                 log::info!(
-                    "audio: capturing \"{}\" ({} Hz, {} ch, {:?})",
+                    "audio: capturing \"{}\" ({} Hz, {} ch, mask {:#x}, {:?})",
                     capture.device_name,
                     capture.format.rate,
                     capture.format.channels,
+                    capture.format.channel_mask,
                     capture.format.sample
                 );
                 status.set("Receiving audio");
-                if analyzer.sample_rate() != capture.format.rate {
-                    analyzer.reset(capture.format.rate);
-                }
+                analyzer.configure(capture.format.rate, capture.fold.is_stereo());
                 match capture.run(sink, stop, &changed_rx, &mut analyzer) {
                     Ended::Stopped => break,
                     Ended::DeviceChanged => log::info!("audio: default output changed; restarting capture"),
@@ -229,6 +230,8 @@ fn pause(stop: &AtomicBool, changed: &Receiver<()>, timeout: Duration) -> bool {
 struct Format {
     sample: SampleFormat,
     channels: usize,
+    /// `WAVEFORMATEXTENSIBLE::dwChannelMask`; 0 for a plain WAVEFORMATEX.
+    channel_mask: u32,
     block_align: usize,
     rate: u32,
 }
@@ -256,6 +259,8 @@ struct Capture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
     format: Format,
+    /// How the format's channels feed the left and right analysers.
+    fold: ChannelFold,
     device_name: String,
 }
 
@@ -295,13 +300,15 @@ impl Capture {
             drop(mix);
             let capture: IAudioCaptureClient = client.GetService()?;
             client.Start()?;
-            Ok(Capture { client, capture, format, device_name })
+            let fold = ChannelFold::new(format.channels, format.channel_mask);
+            Ok(Capture { client, capture, format, fold, device_name })
         }
     }
 
-    fn run(&self, sink: &EventSink, stop: &AtomicBool, changed: &Receiver<()>, analyzer: &mut Analyzer) -> Ended {
+    fn run(&self, sink: &EventSink, stop: &AtomicBool, changed: &Receiver<()>, analyzer: &mut StereoAnalyzer) -> Ended {
         let rate = f64::from(self.format.rate);
-        let mut mono: Vec<f32> = Vec::with_capacity(self.format.rate as usize / 10);
+        let mut left: Vec<f32> = Vec::with_capacity(self.format.rate as usize / 10);
+        let mut right: Vec<f32> = Vec::with_capacity(self.format.rate as usize / 10);
         let mut last_packet = Instant::now();
         let mut silence_fed_until = Instant::now();
         let mut last_frame = Instant::now();
@@ -319,7 +326,8 @@ impl Capture {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
             }
 
-            mono.clear();
+            left.clear();
+            right.clear();
             let mut got_packets = false;
             loop {
                 let pending = match unsafe { self.capture.GetNextPacketSize() } {
@@ -337,26 +345,20 @@ impl Capture {
                 }
                 if frames > 0 {
                     if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
-                        mono.resize(mono.len() + frames as usize, 0.0);
+                        self.fold.silence(frames as usize, &mut left, &mut right);
                     } else {
                         // SAFETY: WASAPI guarantees `frames` frames of
                         // `nBlockAlign` bytes at `data` until ReleaseBuffer.
                         let bytes =
                             unsafe { std::slice::from_raw_parts(data, frames as usize * self.format.block_align) };
-                        dsp::downmix(
-                            bytes,
-                            self.format.sample,
-                            self.format.channels,
-                            self.format.block_align,
-                            &mut mono,
-                        );
+                        self.fold.decode(bytes, self.format.sample, self.format.block_align, &mut left, &mut right);
                     }
                 }
                 if let Err(error) = unsafe { self.capture.ReleaseBuffer(frames) } {
                     return Ended::Failed(error);
                 }
                 got_packets = true;
-                if mono.len() >= self.format.rate as usize {
+                if left.len() >= self.format.rate as usize {
                     break;
                 }
             }
@@ -367,10 +369,10 @@ impl Capture {
                 silence_fed_until = now;
             } else if now.duration_since(last_packet) >= SILENCE_AFTER && silent_frames < SILENT_FRAMES_BEFORE_IDLE {
                 let gap = now.duration_since(silence_fed_until).min(Duration::from_millis(500));
-                mono.resize((gap.as_secs_f64() * rate) as usize, 0.0);
+                self.fold.silence((gap.as_secs_f64() * rate) as usize, &mut left, &mut right);
                 silence_fed_until = now;
             }
-            if !mono.is_empty() && analyzer.push(&mono) {
+            if !left.is_empty() && analyzer.push(&left, &right) {
                 fresh = true;
             }
             if fresh && now.duration_since(last_frame) >= MIN_FRAME_INTERVAL {
@@ -411,19 +413,20 @@ unsafe fn parse_format(format: *const WAVEFORMATEX) -> Option<Format> {
     }
     let base = ptr::read_unaligned(format);
     let tag = u32::from(base.wFormatTag);
-    let is_float = match tag {
-        WAVE_FORMAT_IEEE_FLOAT => true,
-        WAVE_FORMAT_PCM => false,
+    let (is_float, channel_mask) = match tag {
+        WAVE_FORMAT_IEEE_FLOAT => (true, 0),
+        WAVE_FORMAT_PCM => (false, 0),
         WAVE_FORMAT_EXTENSIBLE if base.cbSize >= 22 => {
             let extensible = ptr::read_unaligned(format as *const WAVEFORMATEXTENSIBLE);
             let sub_format = extensible.SubFormat;
-            if sub_format == SUBTYPE_IEEE_FLOAT {
+            let is_float = if sub_format == SUBTYPE_IEEE_FLOAT {
                 true
             } else if sub_format == SUBTYPE_PCM {
                 false
             } else {
                 return None;
-            }
+            };
+            (is_float, extensible.dwChannelMask)
         }
         _ => return None,
     };
@@ -434,7 +437,7 @@ unsafe fn parse_format(format: *const WAVEFORMATEX) -> Option<Format> {
     if !(1..=32).contains(&channels) || block_align < channels * sample.bytes() || !(8_000..=384_000).contains(&rate) {
         return None;
     }
-    Some(Format { sample, channels, block_align, rate })
+    Some(Format { sample, channels, channel_mask, block_align, rate })
 }
 
 unsafe fn describe_format(format: *const WAVEFORMATEX) -> String {

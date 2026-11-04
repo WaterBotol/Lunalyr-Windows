@@ -123,7 +123,7 @@ export function runningRender(): RenderState {
 }
 
 export function emptyLookup(): LookupInfo {
-  return { candidates: [], states: [], pinned: false, cached: false };
+  return { candidates: [], states: [], pinned: false, cached: false, searching: false };
 }
 
 export function emptySnapshot(): Snapshot {

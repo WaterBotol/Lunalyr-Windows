@@ -39,8 +39,8 @@ State lives only in Rust. Webviews render and send user actions; every event car
 |---|---|---|
 | AppleScript to Music + `com.apple.Music.playerInfo` notifications, 2 s re-anchor | **GSMTC** (`GlobalSystemMediaTransportControlsSessionManager`): media properties, timeline (`Position` at `LastUpdatedTime`), playback info, thumbnail | Works for Spotify, Apple Music for Windows, browsers and any app using SMTC; no automation permission. Some players only update the timeline on seek, so it is re-sampled every few seconds. |
 | Desktop-level `NSWindow` per display | **Progman/WorkerW**: send `0x052C` to Progman; legacy layout parents the window into the WorkerW behind `SHELLDLL_DefView`; Windows 11 24H2+ "raised desktop" (Progman has `WS_EX_NOREDIRECTIONBITMAP`) makes it a `WS_CHILD` + `WS_EX_LAYERED` child of Progman z-ordered directly below `SHELLDLL_DefView`, with WorkerW kept last | Algorithm cross-checked against Lively Wallpaper's `WinDesktopCore.cs` (which quotes Microsoft's guidance for the raised desktop). One window per monitor in physical pixels; the process is Per-Monitor-V2 DPI aware. |
-| `NSScreen` change notifications | Hidden top-level window: `WM_DISPLAYCHANGE`, `WM_SETTINGCHANGE`, `WM_DPICHANGED` → rebuild; `TaskbarCreated` (+ Explorer PID check) and a WorkerW destroy hook → rediscover and re-attach; 2 s watchdog re-attaches if the parent vanished | |
-| `WindowRenderActivity` (occlusion) | Coverage poll: a visible, non-cloaked, maximised or full-screen window on a monitor pauses that monitor's renderer; `SHQueryUserNotificationState` for D3D full-screen/presentation mode; session lock pauses everything | Setting: *Pause when covered* (on by default on Windows). |
+| `NSScreen` change notifications | Hidden top-level window: `WM_DISPLAYCHANGE`, `WM_SETTINGCHANGE`, `WM_DPICHANGED` → re-attach; `TaskbarCreated` (+ Explorer PID check) and a destroy hook on our parent window (Progman, plus the WorkerW in the legacy layout) → recreate the wallpapers; a 2 s watchdog re-attaches anything that came loose (e.g. Explorer replacing the 24H2 WorkerW sibling) | Window creation is always posted to the event loop, never run inside a WebView2 callback (that deadlocks). |
+| `WindowRenderActivity` (occlusion) | Coverage poll: a visible, non-cloaked, maximised or full-screen window on a monitor pauses that monitor's renderer; `SHQueryUserNotificationState` for exclusive D3D full-screen; session lock and displays off (`GUID_SESSION_DISPLAY_STATUS`) pause everything; audio capture stops whenever no wallpaper is rendering | Setting: *Pause when covered* (on by default on Windows). |
 | Core Audio process tap / ScreenCaptureKit | **WASAPI loopback** of the default render endpoint, restarted on default-device change | Milestone 2. Analysis (FFT bands, flux, beat) ported from `AudioAnalyzer.swift` / `AudioAnalysis.c`. |
 | Menu-bar extra | Notification-area (tray) icon and menu | |
 | SwiftUI settings workspace | `settings.html` in a WebView2 window | |
@@ -77,7 +77,17 @@ State lives only in Rust. Webviews render and send user actions; every event car
 | Word segmentation differs from macOS for CJK (UAX #29 vs dictionary). | Only affects estimated word timing of line-synced CJK lyrics (per character on Windows). Real word timing is unaffected. |
 | Unofficial provider APIs (NetEase, QQ, Kugou, Kuwo) can change or block. | Same exposure as macOS; each provider fails independently with a visible state; LRCLIB is the documented API. |
 | No code signing yet: SmartScreen will warn on the installer. | Signing needs a certificate; out of scope for this port. |
+| Proxies: lyric requests use the Windows system proxy only in its common `host:port` form, read at start-up. Per-protocol WinINet values (e.g. SOCKS-only), PAC/WPAD scripts and proxies switched on later are not handled. | Behind such a proxy lookups fail with a visible per-source error. A proper fix reads the proxy per request from the platform layer. |
 | Cross-compiling the full installer on a Mac (cargo-xwin) is possible but untested. | CI on `windows-latest` builds the installer instead. |
+
+### Deliberate differences from macOS
+
+- CJK line-synced lyrics distribute estimated word timing per character (Unicode word boundaries have no dictionary). Real word timing is unaffected.
+- LRC files whose multi-timestamp rows would expand to more than twice the 1 MB file limit are rejected (macOS expands them without a bound). Real files are far below this.
+- Kugou is queried through `mobileservice.kugou.com`: the macOS host's TLS certificate no longer matches its name.
+- Readings: there is no system language recogniser; Han-only lines count as Japanese only when the song has kana, otherwise as Mandarin. Scripts without a transliteration (Cyrillic, Greek, Devanagari, Thai) get no reading.
+- Japanese readings come from Windows' `JapanesePhoneticAnalyzer` instead of macOS's tokenizer.
+- A refresh (reload, source change, corrected duration) keeps the current lyrics on screen until the new result arrives, as macOS does; only a new song shows the loading state.
 
 ## 5. Milestones
 

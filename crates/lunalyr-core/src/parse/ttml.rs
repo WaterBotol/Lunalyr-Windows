@@ -260,6 +260,22 @@ mod tests {
     }
 
     #[test]
+    fn zero_width_space_trims_like_foundation_whitespace() {
+        // A paragraph of only U+200B is an instrumental break, as on macOS.
+        let xml = "<tt><body><p begin='1s' end='3s'><span begin='1s' end='2s'>Hold</span> <span begin='2s' end='3s'>on</span></p><p begin='3s' end='5s'>\u{200B}</p></body></tt>";
+        let lines = parse_ttml(xml, 10.0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].is_instrumental);
+        assert_eq!(crate::timing::precision(&lines), crate::timing::WORD_BY_WORD);
+        // Span labels lose it, but the coverage check (Character.isWhitespace)
+        // keeps it in the paragraph text, so as on macOS the timing is estimated.
+        let xml = "<tt><body><p begin='5s' end='6s'><span begin='5s' end='6s'>\u{200B}go</span></p></body></tt>";
+        let line = &parse_ttml(xml, 10.0)[0];
+        assert_eq!(line.text, "go");
+        assert!(!line.word_timed);
+    }
+
+    #[test]
     fn malformed_xml_gives_nothing() {
         assert!(parse_ttml("<tt><p begin='1s' end='2s'>x</tt>", 0.0).is_empty());
         assert!(parse_ttml("<tt><p begin='1s' end='2s'>&bogus;</p></tt>", 0.0).is_empty());

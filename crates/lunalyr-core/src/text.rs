@@ -11,9 +11,11 @@ pub(crate) fn is_newline(c: char) -> bool {
     matches!(c, '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
-/// `CharacterSet.whitespaces`: general category Zs plus TAB (no newlines).
+/// `CharacterSet.whitespaces`: general category Zs, TAB and U+200B ZERO
+/// WIDTH SPACE (no newlines). CoreFoundation counts U+2000–U+200B as
+/// spaces; Unicode's White_Space (`char::is_whitespace`) stops at U+200A.
 pub(crate) fn is_space(c: char) -> bool {
-    c == '\t' || (c.is_whitespace() && !is_newline(c))
+    c == '\t' || c == '\u{200B}' || (c.is_whitespace() && !is_newline(c))
 }
 
 /// `trimmingCharacters(in: .whitespaces)`.
@@ -21,9 +23,10 @@ pub(crate) fn trim_spaces(s: &str) -> &str {
     s.trim_matches(is_space)
 }
 
-/// `trimmingCharacters(in: .whitespacesAndNewlines)`.
+/// `trimmingCharacters(in: .whitespacesAndNewlines)` (U+200B included, as
+/// in [`is_space`]).
 pub(crate) fn trim_all(s: &str) -> &str {
-    s.trim_matches(char::is_whitespace)
+    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{200B}')
 }
 
 /// `components(separatedBy: .newlines)`, except that CR LF counts as one
@@ -55,7 +58,8 @@ pub(crate) fn grapheme_is_alnum(g: &str) -> bool {
     g.chars().next().is_some_and(char::is_alphanumeric)
 }
 
-/// Swift `Character.isWhitespace` for one grapheme.
+/// Swift `Character.isWhitespace` for one grapheme (Unicode White_Space:
+/// unlike the Foundation sets above, U+200B is not whitespace here).
 pub(crate) fn grapheme_is_whitespace(g: &str) -> bool {
     g.chars().next().is_some_and(char::is_whitespace)
 }
@@ -137,6 +141,26 @@ mod tests {
         assert_eq!(trim_spaces("\t a b \u{3000}"), "a b");
         assert_eq!(trim_spaces("\na\n"), "\na\n");
         assert_eq!(trim_all("\n a \r\n"), "a");
+        assert_eq!(trim_spaces("\u{200B}x\u{200B}"), "x");
+        assert_eq!(trim_all("\u{200B}\nx \u{200B}"), "x");
+        // Enumerated from CharacterSet.whitespaces and .newlines on macOS.
+        let foundation_space = |c: char| {
+            matches!(
+                c,
+                '\t' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200B}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+            )
+        };
+        let foundation_newline = |c: char| matches!(c, '\n'..='\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
+        let mut buffer = [0u8; 4];
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            assert_eq!(is_space(c), foundation_space(c), "{c:?}");
+            assert_eq!(is_newline(c), foundation_newline(c), "{c:?}");
+            let alone = c.encode_utf8(&mut buffer);
+            assert_eq!(trim_all(alone).is_empty(), foundation_space(c) || foundation_newline(c), "{c:?}");
+        }
+        // Character.isWhitespace does not include U+200B.
+        assert!(!grapheme_is_whitespace("\u{200B}"));
+        assert_eq!(without_whitespace("a\u{200B}b"), "a\u{200B}b");
     }
 
     #[test]

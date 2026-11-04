@@ -37,6 +37,7 @@ static NON_LATIN: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static LATIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{Latin}").unwrap());
 
 /// Segments of a Japanese text as `(surface, reading)` pairs, in order, the
 /// reading in kana (or already Latin); None when no analyser is available.
@@ -79,9 +80,24 @@ pub fn detect_language(text: &str, fallback: Language) -> Language {
     }
 }
 
-/// Removes diacritics (tone marks, macrons, umlauts).
+/// Removes diacritics (tone marks, macrons, umlauts) from Latin letters.
+/// Marks on other scripts spell the text (й, ά, Devanagari and Thai vowel
+/// signs, kana voicing) and stay: macOS only strips transliterated Latin,
+/// while here non-Latin text can pass through a reading unconverted.
 pub fn strip_diacritics(text: &str) -> String {
-    text.nfd().filter(|c| !is_combining_mark(*c)).nfc().collect()
+    let mut latin_base = false;
+    let mut out = String::with_capacity(text.len());
+    for c in text.nfd() {
+        if is_combining_mark(c) {
+            if latin_base {
+                continue;
+            }
+        } else {
+            latin_base = LATIN.is_match(c.encode_utf8(&mut [0; 4]));
+        }
+        out.push(c);
+    }
+    out.nfc().collect()
 }
 
 fn normalized(text: &str, tone_marks: bool) -> String {
@@ -250,7 +266,9 @@ impl Romanizer<'_> {
             },
             Language::Mandarin => pinyin(text),
             Language::Korean => hangul_to_latin(text),
-            Language::Other => text.to_string(),
+            // Not transliterated: the word is its own reading (none), and
+            // tone-mark stripping must not alter it.
+            Language::Other => return text.to_string(),
         };
         let reading = normalized(&reading, self.tone_marks);
         self.memo.insert((language, text.to_string()), reading.clone());
@@ -343,7 +361,8 @@ impl Romanizer<'_> {
 /// counts agree; shown whole under a one-word line ("below"). Otherwise lines
 /// with non-Latin text are romanised word by word; a word's language is
 /// detected from the word, then the line, then the first 24 lines.
-/// `tone_marks` false strips all diacritics from readings.
+/// `tone_marks` false strips diacritics from the Latin letters of readings;
+/// text in other scripts (which gets no reading) is never altered.
 pub fn readings(
     lines: &[Line],
     display: ReadingDisplay,
@@ -565,6 +584,37 @@ mod tests {
         assert_eq!(texts, ["saranghae", "baby"]);
         assert!(result[1].is_none());
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn other_scripts_get_no_reading_without_tone_marks_either() {
+        // Cyrillic, Greek, Devanagari, Thai and pointed Hebrew all carry marks.
+        let texts = ["Ты мой, ещё", "αγάπη μου", "प्यार", "รักเธอ", "שָׁלוֹם"];
+        for text in texts {
+            let lines = [crate::timing::make_line(text, 0.0, 3.0)];
+            for display in [ReadingDisplay::Below, ReadingDisplay::Replace] {
+                for tone_marks in [true, false] {
+                    let result = readings(&lines, display, tone_marks, &none);
+                    assert!(result[0].is_none(), "{text} {display:?} tone marks {tone_marks}: {:?}", result[0]);
+                }
+            }
+            assert_eq!(romanize(text, Language::Other, false, &none), text);
+        }
+    }
+
+    #[test]
+    fn stripping_tone_marks_only_touches_latin_letters() {
+        assert_eq!(strip_diacritics("nǚ rén lǜ ê̄"), "nu ren lu e");
+        assert_eq!(strip_diacritics("東京tawā"), "東京tawa");
+        for kept in ["Ты мой, ещё", "αγάπη", "प्यार", "รัก", "がぎぐ", "한국어"] {
+            assert_eq!(strip_diacritics(kept), kept);
+        }
+        // Non-Latin text passed through a reading keeps its spelling.
+        assert_eq!(romanize("你好й", Language::Mandarin, false, &none), "ni hao й");
+        let mut saved = line("你好", &[("你好", 1.0, 3.0)], true);
+        saved.romanization = Some("néih hóu ёлка".into());
+        let result = readings(&[saved], ReadingDisplay::Below, false, &none);
+        assert_eq!(result[0].as_ref().unwrap()[0].text, "neih hou ёлка");
     }
 
     #[test]

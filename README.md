@@ -6,13 +6,19 @@ Lunalyr sits in the notification area, follows the song that is playing in any a
 
 > Status: early port. See [PORTING.md](PORTING.md) for the architecture and what is reused from macOS, and [VALIDATION.md](VALIDATION.md) for what has been verified and how.
 
-## Features (Milestone 1)
+![Lunalyr on a Windows 11 24H2 desktop: word-timed lyrics on an album-colour wallpaper behind the desktop icons](docs/screenshots/ci-windows-24h2-wallpaper.png)
 
-- Now playing from Windows' Global System Media Transport Controls — no app-specific setup or permissions.
-- Lyrics from **LRCLIB** and **NetEase Cloud Music**, with LRC, word-timed LRC, YRC and LRCLIB Lyricsfile parsing and the macOS app's "Accuracy first" ranking (best timing first, then title/artist/duration confidence, then source order).
-- A wallpaper window behind the desktop icons on each monitor (Windows 10 and Windows 11, including the 24H2 desktop changes), paused automatically while a full-screen or maximised app covers it.
-- Two lyric compositions from the macOS app — **Editorial** and **Spoken** — with word-timed reveals and next-word previews, over an animated album-colour gradient.
-- Saved choices, per-song offsets, settings persisted under `%APPDATA%`.
+*Captured by the CI smoke test on GitHub's Windows Server 2025 (24H2) runner: a media session reports "Amazing Grace" (public-domain words), Lunalyr finds word-timed lyrics and draws them behind the desktop icons.*
+
+## Features
+
+- **Now playing** from Windows' Global System Media Transport Controls: Spotify, Apple Music for Windows, browsers and anything else that shows up in the Windows media flyout. No app-specific setup or permissions.
+- **Lyrics** from LRCLIB, NetEase Cloud Music, Lyrics+/KPoe, QQ Music, Kugou, Kuwo, lyrics.ovh and a folder of your own LRC/TTML/YRC files, chosen with the macOS app's "Accuracy first" rules (real word timing first, then title/artist/duration confidence, then your source order). Saved choices, LRC/TTML import and per-song offsets.
+- **A wallpaper behind the desktop icons** on every monitor, on Windows 10 and Windows 11 including the 24H2 desktop changes. It pauses while a full-screen or maximised app covers a monitor, while the PC is locked and while the displays are off.
+- **All eight lyric compositions** from macOS — Editorial, Spoken, Scattered, Constellation, Constellation + Editorial, Echo, Cascade and Cutout — with word-timed reveals, next-word previews and instrumental-interlude cues, over an animated album-colour gradient.
+- **Visualisers** driven by the sound playing on the PC (WASAPI loopback): a calm built-in spectrum and the bundled Wavefield engine.
+- **Readings**: Japanese (using Windows' own phonetic analyser), Mandarin pinyin with or without tone marks, Korean Revised Romanization — shown below the lyrics or in place of them.
+- Tray menu, settings window, launch at login, settings saved under `%APPDATA%`.
 
 ## Install
 

@@ -14,10 +14,19 @@ static LINE_STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([0-9]{1,3}):([0-5][0-9])(?:[.:]([0-9]{1,3}))?\]").unwrap());
 static WORD_STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<([0-9]{1,3}):([0-5][0-9])(?:[.:]([0-9]{1,3}))?>").unwrap());
-static OFFSET_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^\s*\[offset:([+-]?[0-9]+)\]").unwrap());
+// Matched per row: a multi-line `^` in Rust follows only LF, while ICU's
+// also follows CR, NEL, U+2028 and the other breaks `split_newlines` uses.
+static OFFSET_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*\[offset:([+-]?[0-9]+)\]").unwrap());
 
 /// Largest LRC accepted, in bytes.
 pub const MAX_LRC_BYTES: usize = 1_000_000;
+
+/// Upper bound on the text a file may expand to through multi-stamp rows:
+/// the sum over rows of leading stamps × (body bytes + 1). Every stamp
+/// copies its row's text and words, so without it a crafted 1 MB file asks
+/// for hundreds of GB. Files of one-stamp rows stay under it by
+/// construction; real multi-stamp rows are short.
+const MAX_EXPANDED_BYTES: usize = 2 * MAX_LRC_BYTES;
 
 fn stamp_time(caps: &Captures) -> f64 {
     let minutes: f64 = caps[1].parse().unwrap_or(0.0);
@@ -36,8 +45,13 @@ struct Marker {
 /// Parses LRC into lines (`LyricsFetcher.parseLRC`).
 ///
 /// * `[offset:±ms]` shifts every stamp (positive = earlier file, later lyrics:
-///   the value is *added*, as on macOS); times clamp at 0.
+///   the value is *added*, as on macOS); times clamp at 0. The first row
+///   that starts with the tag wins, whatever the line breaks (LF, CR, CR LF,
+///   NEL, U+2028, ...), as with ICU's line anchors.
 /// * A row may start with several `[mm:ss.xx]` stamps; each produces a line.
+///   Deliberate difference from macOS: a file whose rows would expand past
+///   2 MB of text in total (stamps × row text) gives nothing, instead of
+///   exhausting memory.
 /// * `<mm:ss.xx>` word stamps give real word timing when there is no text
 ///   before the first stamp, no word starts before its line, and starts never
 ///   go backwards; a word's end is the next stamp (the last word ends with
@@ -50,13 +64,18 @@ pub fn parse_lrc(text: &str, track_duration: f64) -> Vec<Line> {
     if text.len() > MAX_LRC_BYTES {
         return Vec::new();
     }
-    let mut offset = 0.0;
-    if let Some(caps) = OFFSET_TAG.captures(text) {
+    let rows = split_newlines(text);
+    let offset = rows.iter().find_map(|row| OFFSET_TAG.captures(row)).map_or(0.0, |caps| {
         let value: f64 = caps[1].parse().unwrap_or(0.0);
-        offset = if value.is_finite() { value / 1000.0 } else { 0.0 };
-    }
+        if value.is_finite() {
+            value / 1000.0
+        } else {
+            0.0
+        }
+    });
     let mut parsed: Vec<(f64, String, Vec<Word>)> = Vec::new();
-    for raw in split_newlines(text) {
+    let mut expanded: usize = 0;
+    for raw in rows {
         let row = trim_spaces(raw);
         let mut leading: Vec<f64> = Vec::new();
         let mut end = 0;
@@ -70,6 +89,10 @@ pub fn parse_lrc(text: &str, track_duration: f64) -> Vec<Line> {
         }
         let Some(&first) = leading.first() else { continue };
         let body = trim_spaces(&row[end..]);
+        expanded = expanded.saturating_add(leading.len().saturating_mul(body.len() + 1));
+        if expanded > MAX_EXPANDED_BYTES {
+            return Vec::new();
+        }
         let markers: Vec<Marker> = WORD_STAMP
             .captures_iter(body)
             .map(|caps| {
@@ -124,7 +147,7 @@ pub fn parse_lrc(text: &str, track_duration: f64) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timing::{precision, LINE_SYNCED, MIXED_TIMING};
+    use crate::timing::{precision, LINE_SYNCED, MIXED_TIMING, WORD_BY_WORD};
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
@@ -245,6 +268,51 @@ mod tests {
         assert!(approx(lines[0].words[1].start, 2.5));
         let first_tag_offset = parse_lrc("[OFFSET:100]\n[offset:900]\n[00:01]a", 10.0);
         assert!(approx(first_tag_offset[0].start, 1.1), "first offset tag wins, case-insensitive");
+    }
+
+    #[test]
+    fn offset_tag_is_found_after_any_line_break() {
+        // ICU's multi-line `^` follows every one of these (macOS: 1.5, 3.5).
+        for newline in ["\n", "\r\n", "\r", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let text = ["[ti:x]", "[offset:500]", "[00:01.00]one", "[00:03.00]two"].join(newline);
+            let starts: Vec<f64> = parse_lrc(&text, 10.0).iter().map(|l| l.start).collect();
+            assert_eq!(starts, vec![1.5, 3.5], "{newline:?}");
+        }
+        let lines = parse_lrc("[ti:x]\r[offset:500]\r[00:01]<00:01>a <00:02>b", 10.0);
+        assert!(lines[0].word_timed);
+        assert!(approx(lines[0].words[0].start, 1.5));
+        assert!(approx(lines[0].words[1].start, 2.5));
+        assert!(approx(parse_lrc("[ti:x]\r \t[offset:500]\r[00:01]a", 10.0)[0].start, 1.5), "spaces before the tag");
+        assert!(approx(parse_lrc("[ti:x] [offset:500]\r[00:01]a", 10.0)[0].start, 1.0), "not at a row start");
+    }
+
+    #[test]
+    fn multi_stamp_expansion_is_bounded() {
+        // 2,000 stamps on a 2 KB row would be 2,000 lines of 1,000 words.
+        let text = "[00:01]".repeat(2_000) + &"a ".repeat(1_000);
+        assert!(parse_lrc(&text, 10.0).is_empty());
+        // The budget is shared by every row: each of these expands to 90 KB.
+        let row = "[00:01]".repeat(100) + &"<00:01>a ".repeat(100) + "\n";
+        assert!(parse_lrc(&row.repeat(30), 10.0).is_empty());
+        assert_eq!(parse_lrc(&row.repeat(20), 10.0).len(), 2_000);
+        // Real repeated choruses are untouched.
+        assert_eq!(parse_lrc("[00:10][00:40][01:10][01:40][02:10][02:40]Sing it again", 200.0).len(), 6);
+    }
+
+    #[test]
+    fn zero_width_space_trims_like_foundation_whitespace() {
+        // A ZWSP-only row is an instrumental break, as on macOS.
+        let lines =
+            parse_lrc("[00:01.00]<00:01.00>Hold <00:02.00>on\n[00:05.00]\u{200B}\n[00:07.00]<00:07.00>go", 10.0);
+        assert!(lines[1].is_instrumental);
+        assert_eq!(precision(&lines), WORD_BY_WORD);
+        // ZWSP before the stamp or before the first word stamp changes nothing.
+        let lines = parse_lrc("\u{200B}[00:01.00]Hold on", 5.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Hold on");
+        let lines = parse_lrc("[00:01.00]\u{200B}<00:01.00>Hold <00:02.00>on", 5.0);
+        assert!(lines[0].word_timed);
+        assert_eq!(lines[0].text, "Hold on");
     }
 
     #[test]

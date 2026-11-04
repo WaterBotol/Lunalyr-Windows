@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use ::windows::core::{w, BOOL, PCWSTR};
+use ::windows::core::{w, BOOL, PCWSTR, PWSTR};
 use ::windows::Win32::Foundation::HANDLE;
 use ::windows::Win32::Foundation::{
     GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, TRUE, WPARAM,
@@ -28,7 +28,9 @@ use ::windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEARES
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
 use ::windows::Win32::System::RemoteDesktop::{
-    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+    WTSFreeMemory, WTSQuerySessionInformationW, WTSRegisterSessionNotification, WTSSessionInfoEx,
+    WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION, WTSINFOEXW, WTS_CURRENT_SERVER_HANDLE,
+    WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
 };
 use ::windows::Win32::System::SystemServices::GUID_SESSION_DISPLAY_STATUS;
 use ::windows::Win32::System::Threading::GetCurrentProcessId;
@@ -68,6 +70,11 @@ const WM_RETRY_TASKBAR_CREATED: u32 = WM_APP + 1;
 /// WTSRegisterSessionNotification fails until Remote Desktop Services is up
 /// (early autostart); retry once per poll for this long.
 const SESSION_REGISTRATION_ATTEMPTS: u32 = 300;
+
+// `logic` duplicates these Win32 values so its decisions test on any host.
+const _: () = assert!(QUNS_RUNNING_D3D_FULL_SCREEN.0 == logic::notification_state::RUNNING_D3D_FULL_SCREEN);
+const _: () = assert!(QUNS_PRESENTATION_MODE.0 == logic::notification_state::PRESENTATION_MODE);
+const _: () = assert!(WTS_SESSIONSTATE_LOCK as i32 == logic::WTS_SESSIONSTATE_LOCK);
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static WATCHER: AtomicIsize = AtomicIsize::new(0);
@@ -426,11 +433,51 @@ fn poll(window: HWND) {
 
 fn register_session(window: HWND) -> bool {
     match unsafe { WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) } {
-        Ok(()) => true,
+        Ok(()) => {
+            // Notifications report only later changes, and the session may
+            // already be locked: autostart into the locked session Windows
+            // signs in to after an update, Win+L before we got here, or a
+            // lock during the registration retries. A change between
+            // registering and this query arrives afterwards as a queued
+            // WM_WTSSESSION_CHANGE on this thread, and wins.
+            if session_locked() == Some(true) {
+                log::info!("desktop: the session is locked");
+                send(DesktopEvent::SessionLocked(true));
+            }
+            true
+        }
         Err(error) => {
             log::debug!("desktop: WTSRegisterSessionNotification failed ({error}); will retry");
             false
         }
+    }
+}
+
+/// The current session's lock state; `None` if it cannot be read (never
+/// taken as locked).
+fn session_locked() -> Option<bool> {
+    unsafe {
+        let mut buffer = PWSTR::null();
+        let mut bytes = 0u32;
+        WTSQuerySessionInformationW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes,
+        )
+        .ok()?;
+        if buffer.is_null() {
+            return None;
+        }
+        let locked = if bytes as usize >= size_of::<WTSINFOEXW>() {
+            let info = std::ptr::read_unaligned(buffer.0 as *const WTSINFOEXW);
+            (info.Level == 1).then(|| logic::session_flags_locked(info.Data.WTSInfoExLevel1.SessionFlags))
+        } else {
+            None
+        };
+        WTSFreeMemory(buffer.0 as *mut c_void);
+        locked
     }
 }
 
@@ -452,8 +499,11 @@ fn explorer_pid() -> u32 {
     }
 }
 
-/// Watches Explorer for destroyed windows; the callback filters for the
-/// Progman/WorkerW the wallpaper host is using.
+/// Watches Explorer for destroyed windows; the callback filters for the ones
+/// the wallpaper windows are children of (`logic::watched_shell_windows`:
+/// Progman, plus the legacy layout's WorkerW). Explorer replacing the raised
+/// desktop's WorkerW, a sibling of ours, is left to the shell's watchdog,
+/// which re-attaches without recreating anything.
 fn install_hook(pid: u32) -> Option<HWINEVENTHOOK> {
     if pid == 0 {
         return None;
@@ -609,12 +659,15 @@ impl Collect {
     }
 }
 
-/// Exclusive full-screen Direct3D or presentation mode: the shell says so,
-/// and the foreground window's monitor counts as covered (unless the
-/// foreground window is the desktop itself or ours).
+/// Exclusive full-screen Direct3D: the shell says so, and the foreground
+/// window's monitor counts as covered (unless the foreground window is the
+/// desktop itself or ours). Not QUNS_PRESENTATION_MODE: that is a user
+/// toggle (Mobility Center, `presentationsettings /start`), not a full-screen
+/// window, and would freeze whichever monitor has focus; a real full-screen
+/// slideshow is caught by the maximised / contains-the-monitor window check.
 fn fullscreen_monitor(collect: &Collect) -> Option<usize> {
     let state = unsafe { SHQueryUserNotificationState() }.ok()?;
-    if state != QUNS_RUNNING_D3D_FULL_SCREEN && state != QUNS_PRESENTATION_MODE {
+    if !logic::notification_state_covers(state.0) {
         return None;
     }
     let foreground = unsafe { GetForegroundWindow() };

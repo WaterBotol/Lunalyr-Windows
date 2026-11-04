@@ -327,6 +327,37 @@ fn open_settings(app: AppHandle) {
     show_settings(&app);
 }
 
+/// Opens one of a few fixed links in the default browser, or an installed
+/// licence file in its default app. Webviews get no general "open URL"
+/// permission: only these targets exist.
+#[tauri::command]
+fn open_link(app: AppHandle, target: String) -> Result<(), String> {
+    let destination = match target.as_str() {
+        "project" => "https://github.com/WaterBotol/Lunalyr-Windows".to_string(),
+        "mac" => "https://github.com/WaterBotol/Lunalyr".to_string(),
+        "upstream" => "https://github.com/AkkiCode06/verso".to_string(),
+        other => {
+            let file = other.strip_prefix("license:").ok_or("Unknown link.")?;
+            let allowed = [
+                "LICENSE.txt",
+                "THIRD_PARTY_NOTICES.md",
+                "Manrope-OFL.txt",
+                "Wavefield-LICENSE.txt",
+                "Wavefield-Web-Dependencies-LICENSE.txt",
+            ];
+            if !allowed.contains(&file) {
+                return Err("Unknown licence file.".into());
+            }
+            let path = app.path().resource_dir().map_err(|e| e.to_string())?.join("licenses").join(file);
+            if !path.exists() {
+                return Err(format!("{file} is not installed with this build."));
+            }
+            path.to_string_lossy().into_owned()
+        }
+    };
+    open::that_detached(&destination).map_err(|error| format!("Could not open {destination}: {error}"))
+}
+
 #[tauri::command]
 fn set_user_paused(app: AppHandle, state: State<'_, Arc<AppState>>, paused: bool) {
     let effects = lock(&state.controller).set_user_paused(paused);
@@ -373,6 +404,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             log::info!("launch at login is {} in Windows; updating the setting", if actual { "on" } else { "off" });
             settings.launch_at_login = actual;
             let _ = settings.save(&settings_path);
+        } else if actual {
+            // Re-write the command: a reinstall may have moved the executable.
+            if let Err(error) = platform::set_launch_at_login(true) {
+                log::warn!("could not refresh the launch-at-login command: {error}");
+            }
         }
     }
 
@@ -476,6 +512,7 @@ pub fn run() {
             import_lyrics,
             open_settings,
             set_user_paused,
+            open_link,
         ])
         .setup(setup)
         .build(tauri::generate_context!())
