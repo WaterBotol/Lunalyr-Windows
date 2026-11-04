@@ -177,16 +177,8 @@ impl LyricQuery {
     /// Diacritic- and case-insensitive folding; every run of
     /// non-alphanumeric characters becomes one space.
     pub fn normalize(text: &str) -> String {
-        let folded: String = text
-            .nfd()
-            .filter(|c| !is_combining_mark(*c))
-            .flat_map(|c| c.to_lowercase())
-            .collect();
-        folded
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+        let folded: String = text.nfd().filter(|c| !is_combining_mark(*c)).flat_map(|c| c.to_lowercase()).collect();
+        folded.split(|c: char| !c.is_alphanumeric()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
     }
 
     /// 1 for equal normalised strings; otherwise the larger of token overlap

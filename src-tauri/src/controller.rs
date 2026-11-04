@@ -91,37 +91,9 @@ pub struct Controller {
     audio_on: bool,
 }
 
+/// ColorExtractor.fallbackPalette, used before artwork resolves.
 pub fn fallback_palette() -> Palette {
-    // ColorExtractor.fallbackPalette (sRGB) converted to HSB.
-    const RGB: [[f64; 3]; 9] = [
-        [0.23, 0.16, 0.58],
-        [0.12, 0.40, 0.44],
-        [0.65, 0.28, 0.43],
-        [0.15, 0.30, 0.56],
-        [0.54, 0.25, 0.16],
-        [0.43, 0.19, 0.56],
-        [0.10, 0.46, 0.40],
-        [0.55, 0.34, 0.16],
-        [0.30, 0.19, 0.52],
-    ];
-    Palette { hsb: RGB.iter().map(|c| rgb_to_hsb(c[0], c[1], c[2])).collect(), from_artwork: false }
-}
-
-fn rgb_to_hsb(r: f64, g: f64, b: f64) -> [f64; 3] {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-    let hue = if delta <= f64::EPSILON {
-        0.0
-    } else if max == r {
-        ((g - b) / delta).rem_euclid(6.0) / 6.0
-    } else if max == g {
-        ((b - r) / delta + 2.0) / 6.0
-    } else {
-        ((r - g) / delta + 4.0) / 6.0
-    };
-    let saturation = if max <= f64::EPSILON { 0.0 } else { delta / max };
-    [hue, saturation, max]
+    lunalyr_core::palette::fallback_palette()
 }
 
 fn to_value<T: serde::Serialize>(value: &T) -> Value {

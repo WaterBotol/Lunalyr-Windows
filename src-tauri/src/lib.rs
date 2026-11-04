@@ -12,6 +12,7 @@
 //! the commands listed in docs/CONTRACT.md.
 
 pub mod controller;
+mod dsp;
 mod lyrics;
 pub mod platform;
 mod tray;

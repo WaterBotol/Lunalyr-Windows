@@ -1,0 +1,3 @@
+# Matches the style of the existing sources (model/contract/settings).
+max_width = 120
+use_small_heuristics = "Max"

@@ -1,71 +1,78 @@
-//! Adapter between the shell and lunalyr-core's lyric service.
-//!
-//! TEMPORARY: lunalyr-core's providers/lookup/palette modules are being
-//! written; until they land this adapter reports "not found" so the rest of
-//! the pipeline (events, windows, renderer) can be exercised end to end.
+//! Adapter between the shell and lunalyr-core: lookups, saved choices,
+//! imports, palette extraction and readings. Japanese readings come from the
+//! platform layer (Windows' phonetic analyser), everything else is portable.
 
 use std::path::PathBuf;
 
 use lunalyr_core::contract::{CandidateSummary, Palette};
-use lunalyr_core::model::{Candidate, LyricQuery, LyricResult, Word};
+use lunalyr_core::lookup::{self, LyricsService};
+use lunalyr_core::model::{Candidate, Line, LyricQuery, LyricResult, Word};
 use lunalyr_core::settings::{ReadingDisplay, SourceSettings};
+use lunalyr_core::{palette, parse, romanize, timing};
 
 use crate::controller::{LookupOutcome, LyricOps};
+use crate::platform;
 
 pub struct Lyrics {
-    #[allow(dead_code)]
-    cache_dir: PathBuf,
+    service: Option<LyricsService>,
 }
 
 impl Lyrics {
     pub fn new(cache_dir: PathBuf) -> Self {
-        Lyrics { cache_dir }
+        let service = match LyricsService::with_reqwest(cache_dir) {
+            Ok(service) => Some(service),
+            Err(error) => {
+                // Only fails if the OS TLS backend cannot initialise.
+                log::error!("lyric service unavailable: {error}");
+                None
+            }
+        };
+        Lyrics { service }
     }
 
-    pub async fn lookup(&self, _query: &LyricQuery, _sources: &SourceSettings, _force: bool) -> LookupOutcome {
-        LookupOutcome::default()
+    pub async fn lookup(&self, query: &LyricQuery, sources: &SourceSettings, force: bool) -> LookupOutcome {
+        let Some(service) = self.service.as_ref() else { return LookupOutcome::default() };
+        let report = service.lookup(query, sources, force).await;
+        LookupOutcome {
+            result: report.result,
+            candidates: report.candidates,
+            states: report.states,
+            pinned: report.pinned,
+            cached: report.cached,
+        }
     }
 
-    pub fn pin(&self, _query: &LyricQuery, _result: &LyricResult) -> bool {
-        false
+    pub fn pin(&self, query: &LyricQuery, result: &LyricResult) -> bool {
+        self.service.as_ref().map(|s| s.pin(query, result)).unwrap_or(false)
     }
 
-    pub fn unpin(&self, _query: &LyricQuery) {}
-
-    pub fn parse_import(&self, _text: &str, _duration: f64) -> Option<LyricResult> {
-        None
+    pub fn unpin(&self, query: &LyricQuery) {
+        if let Some(service) = self.service.as_ref() {
+            service.unpin(query);
+        }
     }
 
-    pub fn palette(&self, _bytes: &[u8]) -> Option<Palette> {
-        None
+    /// LRC or TTML text from the settings window's import.
+    pub fn parse_import(&self, text: &str, duration: f64) -> Option<LyricResult> {
+        parse::parse_import(text, duration)
     }
 
-    pub fn readings(
-        &self,
-        lines: &[lunalyr_core::model::Line],
-        _display: ReadingDisplay,
-        _tone_marks: bool,
-    ) -> Vec<Option<Vec<Word>>> {
-        vec![None; lines.len()]
+    pub fn palette(&self, bytes: &[u8]) -> Option<Palette> {
+        palette::try_extract_palette(bytes)
+    }
+
+    pub fn readings(&self, lines: &[Line], display: ReadingDisplay, tone_marks: bool) -> Vec<Option<Vec<Word>>> {
+        let japanese = |text: &str| platform::japanese_readings(text);
+        romanize::readings(lines, display, tone_marks, &japanese)
     }
 }
 
 impl LyricOps for Lyrics {
-    fn prepare(&self, result: LyricResult, _repair_qq_gaps: bool) -> LyricResult {
-        result
+    fn prepare(&self, result: LyricResult, repair_qq_gaps: bool) -> LyricResult {
+        timing::prepare(result, repair_qq_gaps)
     }
 
     fn summary(&self, candidate: &Candidate, chosen: bool) -> CandidateSummary {
-        CandidateSummary {
-            source: candidate.source,
-            source_title: candidate.source.title().into(),
-            title: candidate.title.clone(),
-            artist: candidate.artist.clone(),
-            duration: candidate.duration,
-            precision: candidate.result.provenance().precision.clone(),
-            line_count: candidate.result.line_count(),
-            has_readings: false,
-            chosen,
-        }
+        lookup::summary(candidate, chosen)
     }
 }

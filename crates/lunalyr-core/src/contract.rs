@@ -116,7 +116,10 @@ pub enum LyricsView {
         #[serde(default)]
         readings: Vec<Option<Vec<Word>>>,
     },
-    Plain { lines: Vec<String>, provenance: Provenance },
+    Plain {
+        lines: Vec<String>,
+        provenance: Provenance,
+    },
     #[serde(rename_all = "camelCase")]
     NotFound {
         /// Unix epoch ms.

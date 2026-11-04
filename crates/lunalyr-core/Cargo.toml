@@ -21,6 +21,11 @@ regex = "1"
 # TLS comes from the OS: SChannel on Windows, Security.framework on macOS.
 # No ring / aws-lc / openssl, so nothing needs a C toolchain on Windows.
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip"] }
+# Lyrics+ nodes send gzip bodies without Content-Encoding (miniz_oxide backend).
+flate2 = "1"
+base64 = "0.22"
+# Mandarin readings (MIT); only the tone-marked table is compiled in.
+pinyin = { version = "0.11", default-features = false, features = ["with_tone"] }
 # Pure-Rust decoders only (zune-jpeg, png, gif, image-webp, bmp).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "gif", "webp"] }
 

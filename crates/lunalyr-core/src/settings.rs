@@ -295,7 +295,12 @@ impl Settings {
 
     /// Per-recording offset in seconds (macOS `SongOffsets`).
     pub fn song_offset(&self, query: &LyricQuery) -> f64 {
-        self.song_offsets.get(&Self::offset_key(query)).copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(-30.0, 30.0)
+        self.song_offsets
+            .get(&Self::offset_key(query))
+            .copied()
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0)
+            .clamp(-30.0, 30.0)
     }
 
     pub fn set_song_offset(&mut self, query: &LyricQuery, seconds: f64) {
@@ -337,7 +342,8 @@ mod tests {
 
     #[test]
     fn sanitize_clamps_and_repairs() {
-        let mut settings = Settings { lyric_scale: 9.0, frame_rate: 144, lyric_offset: f64::NAN, ..Settings::default() };
+        let mut settings =
+            Settings { lyric_scale: 9.0, frame_rate: 144, lyric_offset: f64::NAN, ..Settings::default() };
         settings.sources.order = vec![SourceId::Lrclib, SourceId::Lrclib];
         settings.sources.enabled = vec![SourceId::NetEase, SourceId::NetEase];
         let settings = settings.sanitized();
@@ -354,8 +360,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert_eq!(Settings::load(&path), Settings::default());
-        let mut settings = Settings::default();
-        settings.lyric_scale = 1.25;
+        let settings = Settings { lyric_scale: 1.25, ..Settings::default() };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).lyric_scale, 1.25);
         std::fs::write(&path, b"{ not json").unwrap();

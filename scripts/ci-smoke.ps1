@@ -75,9 +75,14 @@ if (Test-Path $mediaScript) {
 }
 
 $env:RUST_LOG = "debug"
-$app = Start-Process -FilePath $Exe -PassThru
+# --autostart: behave as when launched at sign-in (no first-run settings window).
+$app = Start-Process -FilePath $Exe -ArgumentList "--autostart" -PassThru
 Write-Host "Started $Exe (pid $($app.Id)); waiting $Seconds s"
-Start-Sleep -Seconds $Seconds
+Start-Sleep -Seconds ([math]::Max(5, $Seconds - 6))
+# Show the bare desktop for the screenshot: minimise every window (including
+# the runner's console), then give the wallpaper a moment to resume.
+(New-Object -ComObject Shell.Application).MinimizeAll()
+Start-Sleep -Seconds 6
 
 [DesktopTree]::Dump() | Tee-Object -FilePath "$OutDir/desktop-tree.txt"
 

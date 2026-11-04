@@ -1,53 +1,23 @@
 //! Windows platform layer: GSMTC now playing, Progman/WorkerW wallpaper
 //! attachment, desktop watcher (display changes, Explorer restarts,
-//! full-screen coverage, session lock), WASAPI loopback and autostart.
+//! full-screen coverage, session lock), WASAPI loopback, autostart and
+//! Japanese readings.
 //!
-//! STUB: the real implementation is being written in submodules
-//! (media.rs, wallpaper.rs, desktop.rs, audio.rs, autostart.rs,
-//! japanese.rs). Until then these placeholders keep the crate compiling.
+//! Exports exactly the API of `dev.rs` (see `platform/mod.rs`). Decisions
+//! that do not need the OS live in `platform/logic.rs` (unit-tested on every
+//! host).
 
-use super::{AudioHandle, EventSink, MonitorInfo, PlatformError, PlatformResult};
+mod audio;
+mod autostart;
+mod desktop;
+mod japanese;
+mod media;
+mod util;
+mod wallpaper;
 
-pub fn start_media(_sink: EventSink) -> PlatformResult<()> {
-    Err(PlatformError::msg("GSMTC media source not implemented yet"))
-}
-
-pub fn start_desktop_watcher(_sink: EventSink) -> PlatformResult<()> {
-    Ok(())
-}
-
-pub fn monitors() -> Vec<MonitorInfo> {
-    Vec::new()
-}
-
-pub struct WallpaperHost;
-
-impl WallpaperHost {
-    pub fn new() -> PlatformResult<Self> {
-        Ok(WallpaperHost)
-    }
-    pub fn refresh(&mut self) -> PlatformResult<()> {
-        Ok(())
-    }
-    pub fn attach(&mut self, _hwnd: isize, _monitor: &MonitorInfo) -> PlatformResult<()> {
-        Err(PlatformError::msg("wallpaper attach not implemented yet"))
-    }
-    pub fn detach(&mut self, _hwnd: isize) -> PlatformResult<()> {
-        Ok(())
-    }
-    pub fn is_attached(&self, _hwnd: isize) -> bool {
-        false
-    }
-}
-
-pub fn start_audio(_sink: EventSink) -> PlatformResult<AudioHandle> {
-    Err(PlatformError::msg("WASAPI loopback not implemented yet"))
-}
-
-pub fn set_launch_at_login(_enabled: bool) -> PlatformResult<()> {
-    Ok(())
-}
-
-pub fn japanese_readings(_text: &str) -> Option<Vec<(String, String)>> {
-    None
-}
+pub use audio::start_audio;
+pub use autostart::set_launch_at_login;
+pub use desktop::start_desktop_watcher;
+pub use japanese::japanese_readings;
+pub use media::start_media;
+pub use wallpaper::{monitors, WallpaperHost};

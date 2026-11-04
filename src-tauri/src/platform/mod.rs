@@ -29,6 +29,9 @@
 
 use lunalyr_core::contract::AudioFrame;
 
+/// Pure, host-testable decisions used by the Windows layer.
+pub mod logic;
+
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
