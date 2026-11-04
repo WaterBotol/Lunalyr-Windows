@@ -1,0 +1,107 @@
+name: Windows build and tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test:
+    name: Tests (Rust + TypeScript)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Renderer unit tests (vitest)
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Rust unit tests (core + app + Windows platform)
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+  build:
+    name: Build installer and smoke-test on the desktop
+    runs-on: windows-latest
+    needs: test
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build app and NSIS installer
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Smoke test (launch, screenshot the desktop, collect the log)
+        shell: pwsh
+        run: ./scripts/ci-smoke.ps1 -Exe target/release/lunalyr.exe -OutDir smoke
+
+      - name: Upload installer and app
+        uses: actions/upload-artifact@v7
+        with:
+          name: lunalyr-windows-${{ github.sha }}
+          path: |
+            target/release/lunalyr.exe
+            target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ github.sha }}
+          path: smoke/
+          if-no-files-found: warn

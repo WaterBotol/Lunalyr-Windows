@@ -18,7 +18,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "publisher": "Lunalyr contributors",
     "shortDescription": "Animated, word-timed lyric wallpapers",
     "longDescription": "Lunalyr turns the Windows desktop into an animated, word-timed lyric wallpaper for the song that is playing.",
@@ -33,10 +35,14 @@
     ],
     "resources": {
       "../LICENSE": "licenses/LICENSE.txt",
-      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "../ui/public/licenses/Wavefield-LICENSE.txt": "licenses/Wavefield-LICENSE.txt",
+      "../ui/public/licenses/Wavefield-Web-Dependencies-LICENSE.txt": "licenses/Wavefield-Web-Dependencies-LICENSE.txt"
     },
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
       "nsis": {
         "installMode": "currentUser"
       }

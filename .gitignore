@@ -22,3 +22,6 @@ Thumbs.db
 # Test output
 /coverage/
 /test-results/
+
+# Local tool configuration
+/.claude/

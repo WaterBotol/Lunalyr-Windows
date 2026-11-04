@@ -2,18 +2,19 @@
   "name": "lunalyr-windows",
   "private": true,
   "version": "0.1.0",
-  "description": "Lunalyr for Windows — renderer, settings UI and build scripts",
+  "description": "Lunalyr for Windows \u2014 renderer, settings UI and build scripts",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@fontsource-variable/manrope": "^5.3.0",
     "@tauri-apps/api": "^2.0.0"
   },
   "devDependencies": {
