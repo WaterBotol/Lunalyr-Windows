@@ -177,7 +177,9 @@ export class WallpaperRenderer {
     const flow = this.ambient.advance(nowPerf / 1000, settings.effectSpeed * 0.7);
     const reduced = this.reduced();
     // Wavefield draws its own background; the spectrum sits over the colour field.
-    if (!this.visualizer.active) this.background.render(flow * 0.34, stops, settings.vividness);
+    const field = !this.visualizer.active;
+    this.background.setVisible(field);
+    if (field) this.background.render(flow * 0.34, stops, settings.vividness);
     if (this.visualizer.drawing) this.visualizer.render(nowPerf, flow, stops, settings, this.metrics, reduced, state.track.palette.fromArtwork);
     this.scene.render({ track: state.track, lyrics: state.lyrics, settings, time, now, reduced, accent: this.accent });
   }

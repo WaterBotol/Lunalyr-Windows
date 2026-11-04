@@ -254,10 +254,12 @@ impl Controller {
         Effect::Tray { now_playing, paused: self.user_paused }
     }
 
-    /// Emits `RenderState` to every wallpaper whose state changed.
+    /// Emits `RenderState` to every wallpaper whose state changed, and to the
+    /// settings window (which shows the user-pause state).
     fn render_effects(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        for (label, _) in self.windows.clone() {
+        let labels = self.windows.iter().map(|(label, _)| label.clone()).chain(std::iter::once("settings".to_string()));
+        for label in labels.collect::<Vec<_>>() {
             let state = self.render_state(&label);
             if self.sent_render.get(&label) != Some(&state) {
                 self.sent_render.insert(label.clone(), state.clone());
@@ -767,7 +769,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(renders, vec![("wallpaper-a".to_string(), true)]);
+        assert_eq!(renders, vec![("wallpaper-a".to_string(), true)], "the settings window is not covered");
         let (_, effects) = c.update_settings(&serde_json::json!({"pauseWhenCovered": false}), &Ops, 0.0).unwrap();
         assert!(effects.iter().any(|e| matches!(e, Effect::Emit { event, target: Target::Window(l), .. } if *event == events::RENDER && l == "wallpaper-a")));
         assert!(!c.render_state("wallpaper-a").paused);
@@ -793,6 +795,10 @@ mod tests {
         assert!(start.contains(&Effect::SetAudio(true)));
         let effects = c.set_user_paused(true);
         assert!(effects.contains(&Effect::SetAudio(false)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Emit { event, target: Target::Window(l), .. } if *event == events::RENDER && l == "settings")),
+            "the settings window learns about the user pause"
+        );
         assert_eq!(c.render_state("wallpaper-a").reason, "user");
     }
 

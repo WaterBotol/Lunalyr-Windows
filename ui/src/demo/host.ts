@@ -224,6 +224,7 @@ export class DemoHost implements Bridge {
     const now = Date.now();
     this.song = scenario === "word" ? SONGS.word : scenario === "line" ? SONGS.line : null;
     this.chosen = scenario === "line" ? "lrclib" : "lyricsPlus";
+    this.pinned = false;
     if (scenario === "idle") {
       this.state.track = { ...this.state.track, track: null, idleSince: now };
     } else {

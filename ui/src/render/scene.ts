@@ -63,6 +63,7 @@ export class LyricScene {
   private readonly interlude: InterludeView;
   private readonly views = new Map<string, { view: LineView; lastUsed: number }>();
   private readonly rolling = new Map<LineRole, RollingStageView>();
+  private readonly preparedRuns = new Map<LineRole, number>();
   private lyrics: LyricsView | null = null;
   private lines: readonly Line[] = [];
   private readings: readonly (Word[] | null)[] = [];
@@ -125,6 +126,7 @@ export class LyricScene {
     this.views.clear();
     for (const view of this.rolling.values()) view.destroy();
     this.rolling.clear();
+    this.preparedRuns.clear();
     this.block.reset();
     this.measurer.clear();
     this.compositions = [];
@@ -302,6 +304,12 @@ export class LyricScene {
       if (stage.rolls) {
         const rolled = rollingWords(lines, this.readings, lineIndex, time, env.readings, stage.behaviour.lead);
         const view = this.rollingView(role);
+        // Measure the whole run's words in one batch rather than one by one as they arrive.
+        if (this.preparedRuns.get(role) !== lineIndex) {
+          this.preparedRuns.set(role, lineIndex);
+          const run = rollingWords(lines, this.readings, lineIndex, lines[lineIndex].start, env.readings, 1e6);
+          view.prepare(run.words, run.readings, stage.composition);
+        }
         view.prepare(rolled.words, rolled.readings, stage.composition);
         plans.push({ kind: "rolling", role, stage, view, words: rolled.words, annotations: rolled.readings });
       } else {

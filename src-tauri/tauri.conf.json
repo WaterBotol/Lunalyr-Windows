@@ -37,7 +37,8 @@
       "../LICENSE": "licenses/LICENSE.txt",
       "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
       "../ui/public/licenses/Wavefield-LICENSE.txt": "licenses/Wavefield-LICENSE.txt",
-      "../ui/public/licenses/Wavefield-Web-Dependencies-LICENSE.txt": "licenses/Wavefield-Web-Dependencies-LICENSE.txt"
+      "../ui/public/licenses/Wavefield-Web-Dependencies-LICENSE.txt": "licenses/Wavefield-Web-Dependencies-LICENSE.txt",
+      "../ui/public/licenses/Manrope-OFL.txt": "licenses/Manrope-OFL.txt"
     },
     "windows": {
       "webviewInstallMode": {

@@ -27,7 +27,7 @@ interface FaceInfo {
 }
 
 const FACES: Record<FontChoice, FaceInfo> = {
-  manrope: { families: ['"Manrope Variable"', '"Segoe UI Variable Text"', '"Segoe UI Variable"', '"Segoe UI"'], regular: 400, bold: 700, ui: 500 },
+  manrope: { families: ['"Manrope Variable"', '"Segoe UI Variable Text"', '"Segoe UI Variable"', '"Segoe UI"'], regular: 400, bold: 700, ui: 400 },
   system: { families: ['"Segoe UI Variable Display"', '"Segoe UI Variable"', '"Segoe UI"', '"Manrope Variable"'], regular: 400, bold: 700, ui: 400 },
   serif: { families: ["Georgia", '"Sitka Text"', "Cambria", '"Times New Roman"'], regular: 400, bold: 700, ui: 400 },
   slab: { families: ["Rockwell", '"Roboto Slab"', '"Rockwell Nova"', "Georgia"], regular: 400, bold: 700, ui: 400 },

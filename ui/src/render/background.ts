@@ -228,7 +228,11 @@ export class GradientBackground {
     this.root.style.background = cssGradient(stops);
   }
 
+  private visible = true;
+
   setVisible(visible: boolean): void {
+    if (visible === this.visible) return;
+    this.visible = visible;
     this.root.style.display = visible ? "" : "none";
   }
 }

@@ -89,13 +89,14 @@ export class RollingStageView {
       const key = `${word.start}|${word.end}|${word.text}`;
       if (this.tokens.has(key)) continue;
       const token = prepareSpokenWord(word, i, this.env.metrics.baseSize, composition, this.env.face, annotations);
-      const t = this.build(token, composition);
+      const t = this.build(token);
       this.tokens.set(key, t);
       created.push(t);
     }
     if (created.length === 0) return;
     const sizes = this.env.measurer.measure(created.map((t) => t.root));
     created.forEach((t, i) => {
+      t.lastUsed = this.frameCounter;
       t.width = sizes[i].width;
       t.height = sizes[i].height;
       t.root.style.width = px(t.width);
@@ -105,7 +106,7 @@ export class RollingStageView {
     });
   }
 
-  private build(token: SpokenToken, composition: ConcreteComposition): Token {
+  private build(token: SpokenToken): Token {
     const root = el("div", "ll-token");
     const inner = el("div", "ll-token-ink", root);
     let tile: Styled | null = null;
@@ -129,7 +130,6 @@ export class RollingStageView {
       reading.style.textShadow = shadow(black(0.25), 7, 2);
     }
     const glyphStyle = new Styled(glyphs);
-    if (composition === "cascade" && token.hero) glyphs.classList.add("ll-accent");
     return {
       token,
       root,

@@ -218,9 +218,19 @@ class WavefieldView {
     this.iframe.src = "./engines/WavefieldEngine.html";
   }
 
+  /** True once the engine is known not to work here (missing or threw); the colour field takes over. */
+  get broken(): boolean {
+    return this.failed;
+  }
+
   private onLoad(): void {
     const doc = this.iframe.contentDocument;
-    if (!doc?.body) return;
+    const engine = (this.iframe.contentWindow as unknown as { lunalyrWavefield?: unknown } | null)?.lunalyrWavefield;
+    if (!doc?.body || !engine) {
+      // Blocked (CSP, missing file) or not same-origin: fall back quietly.
+      this.fail("Wavefield engine did not load");
+      return;
+    }
     // The same album blend the macOS host injects as a user script.
     doc.body.style.isolation = "isolate";
     const overlay = doc.createElement("div");
@@ -244,9 +254,15 @@ class WavefieldView {
     try {
       engine.draw(frame);
     } catch (error) {
-      this.failed = true;
-      console.error("Wavefield engine:", error);
+      this.fail(error);
     }
+  }
+
+  private fail(reason: unknown): void {
+    if (this.failed) return;
+    this.failed = true;
+    this.iframe.style.display = "none";
+    console.error("Wavefield engine:", reason);
   }
 
   destroy(): void {
@@ -273,7 +289,7 @@ export class VisualizerLayer {
 
   /** True when the visualiser replaces the colour field (Wavefield draws its own background). */
   get active(): boolean {
-    return this.enabled && this.style === "wavefield";
+    return this.enabled && this.style === "wavefield" && !(this.wavefield?.broken ?? false);
   }
 
   /** True when anything visualiser-related draws this frame. */

@@ -14,6 +14,10 @@ This file lists every third-party component bundled in the Windows app. It is up
 
 Rust crate and npm package licences are recorded in `Cargo.lock` / `package-lock.json`; all are permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 or MPL-2.0 for unmodified dependencies).
 
+## Manrope (font)
+
+The default lyric and interface face is [Manrope](https://github.com/sharanda/manrope), copyright 2019 The Manrope Project Authors, licensed under the SIL Open Font License 1.1. It is bundled from the `@fontsource-variable/manrope` package (5.3.0). The licence is installed as `licenses/Manrope-OFL.txt`.
+
 ## Wavefield (visualiser engine)
 
 The **Wavefield** visualiser bundles [Wavefield](https://github.com/niko-dellic/wavefield), copyright (c) 2026 Niko Dellic, under the MIT licence, pinned at commit `3858a657190ebd09bee704caa094e7e1fd3c6cc2`. `ui/public/engines/WavefieldEngine.html` is the unmodified engine bundle built for Lunalyr for macOS; its provenance, build script and Lunalyr entry point are kept in [ThirdParty/Wavefield](ThirdParty/Wavefield/SOURCE.md). The bundle includes Three.js (MIT) and postprocessing (zlib). Complete notices are installed with the app as `licenses/Wavefield-LICENSE.txt` and `licenses/Wavefield-Web-Dependencies-LICENSE.txt`. No Wavefield branding, browser UI or demo music is included.

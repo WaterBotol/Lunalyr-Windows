@@ -246,11 +246,6 @@ export class ScatteredLineView {
     this.rootStyle.set("zIndex", String(z));
   }
 
-  /** Static content (readings on a line-timed phrase): nothing animates per word. */
-  get isStatic(): boolean {
-    return this.inks.every((ink) => ink.chars.length === 0 && ink.lit === null);
-  }
-
   /** Per-frame update for a word-timed line. */
   update(stage: LineStage, frame: FrameEnv, env: BuildEnv, lyricOpacity: number, available: { width: number; height: number }): void {
     const time = frame.time;
