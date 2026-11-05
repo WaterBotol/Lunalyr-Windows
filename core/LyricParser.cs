@@ -53,6 +53,7 @@ public static partial class LyricParser
         ".ttml" or ".xml" => Ttml(content, duration),
         ".yrc" => Yrc(content),
         ".txt" => Plain(content),
+        ".yaml" or ".yml" => Yaml(content, duration),
         _ => Lrc(content, duration)
     };
 
@@ -64,11 +65,14 @@ public static partial class LyricParser
     {
         double offset = Number(Offset().Match(content).Groups[1].Value) / 1000;
         var lines = new List<Line>();
+        long expansion = 0;
         foreach (string row in content.TrimStart('\uFEFF').Split('\n'))
         {
             var stamps = LineStamp().Matches(row);
             if (stamps.Count == 0) continue;
             string text = row[(stamps[^1].Index + stamps[^1].Length)..].Trim();
+            expansion += (long)stamps.Count * (text.Length + 1);
+            if (expansion > 2_000_000) break;
             var wordStamps = WordStamp().Matches(text);
             string plain = WordStamp().Replace(text, "").Trim();
             double original = Clock(stamps[0].Groups[1].Value);
@@ -190,13 +194,16 @@ public static partial class LyricParser
     {
         var rows = source.OrderBy(row => row.Start ?? double.PositiveInfinity).ToArray();
         var result = new List<Line>();
+        var nextStarts = new double?[rows.Length];
+        for (int i = rows.Length - 2; i >= 0; i--)
+            nextStarts[i] = rows[i + 1].Start > rows[i].Start ? rows[i + 1].Start : nextStarts[i + 1];
         for (int i = 0; i < rows.Length; i++)
         {
             Line line = rows[i];
             if (line.Text.Length == 0) continue;
             if (!line.Start.HasValue) { result.Add(line); continue; }
             double start = line.Start.Value;
-            double? next = rows.Skip(i + 1).Select(row => row.Start).FirstOrDefault(value => value > start);
+            double? next = nextStarts[i];
             double end = line.End > start ? line.End.Value : next ?? (duration > start ? duration : start + 5);
             Word[] words = line.Words.Where(word => word.Start >= start - .25 && word.Start < end)
                 .OrderBy(word => word.Start).ToArray();

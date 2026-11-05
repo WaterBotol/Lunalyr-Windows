@@ -10,7 +10,7 @@ namespace Lunalyr.Core;
 
 public sealed class LyricLookup(HttpClient http)
 {
-    public static readonly string[] Formats = [".lrc", ".yrc", ".ttml", ".xml", ".txt"];
+    public static readonly string[] Formats = [".lrc", ".yrc", ".ttml", ".xml", ".txt", ".yaml", ".yml"];
     public static readonly Dictionary<string, string> Names = new()
     {
         ["local"] = "Local lyrics", ["lyricsplus"] = "Lyrics+", ["netease"] = "NetEase",
@@ -83,11 +83,12 @@ public sealed class LyricLookup(HttpClient http)
     public static Lyrics? ReadFile(string path, double duration, string source = "local")
     {
         if (!Formats.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
-            throw new FormatException("Choose an LRC, YRC, TTML or text lyric file.");
+            throw new FormatException("Choose an LRC, YRC, TTML, YAML or text lyric file.");
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         if (stream.Length > 4_000_000) throw new FormatException("Lyric files may be up to 4 MB.");
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        return Make(source, LyricParser.Parse(reader.ReadToEnd(), Path.GetExtension(path), duration));
+        try { return Make(source, LyricParser.Parse(reader.ReadToEnd(), Path.GetExtension(path), duration)); }
+        catch (YamlDotNet.Core.YamlException error) { throw new FormatException("Invalid YAML lyrics.", error); }
     }
 
     private static Lyrics? Local(Track track, string path, CancellationToken token)

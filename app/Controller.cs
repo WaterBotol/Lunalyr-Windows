@@ -26,6 +26,7 @@ internal sealed class Controller : ApplicationContext
     private readonly Dictionary<string, (Surface Surface, Rectangle Bounds)> desktop = [];
     private readonly Dictionary<string, Lyrics[]> cache = [];
     private readonly HashSet<string> blocked = [];
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Lyrics, Lyrics> readings = new();
     private readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
     private CoreWebView2Environment? environment;
     private Surface? settings;
@@ -320,6 +321,7 @@ internal sealed class Controller : ApplicationContext
     {
         var choice = CurrentChoice();
         var selected = candidates.FirstOrDefault(row => row.Source == choice.Source) ?? candidates.FirstOrDefault();
+        if (selected is not null && preferences.Reading != "off") selected = readings.GetValue(selected, WindowsReadings.Add);
         return new { selected, offset = choice.Offset, saved = choice.Path is not null || choice.Source is not null,
             sources = candidates.Select(row => new { row.Source, row.Quality }), lookup = lookupStatus };
     }
@@ -430,6 +432,7 @@ internal sealed class Controller : ApplicationContext
         preferences = next;
         SendAll("preferences", preferences);
         if (previous.Player != next.Player) _ = Tick();
+        if (previous.Reading != next.Reading) SendLyrics();
         if (previous.LyricsFolder != next.LyricsFolder || previous.PreferWords != next.PreferWords
             || previous.LookupPolicy != next.LookupPolicy || !previous.Sources.SequenceEqual(next.Sources)
             || !previous.DisabledSources.SequenceEqual(next.DisabledSources)) ReloadLyrics();
@@ -448,7 +451,7 @@ internal sealed class Controller : ApplicationContext
     private void ImportLyrics(Surface owner)
     {
         if (playback.Track is not { } track) { owner.Send("notice", "Play a song before importing lyrics."); return; }
-        using var dialog = new OpenFileDialog { Filter = "Lyrics|*.lrc;*.ttml;*.xml;*.yrc;*.txt", CheckFileExists = true };
+        using var dialog = new OpenFileDialog { Filter = "Lyrics|*.lrc;*.ttml;*.xml;*.yrc;*.txt;*.yaml;*.yml", CheckFileExists = true };
         if (dialog.ShowDialog(owner) != DialogResult.OK) return;
         if (LyricLookup.ReadFile(dialog.FileName, track.Duration) is null) throw new FormatException("This file has no readable lyric lines.");
         string name = Guid.NewGuid().ToString("N") + Path.GetExtension(dialog.FileName).ToLowerInvariant();

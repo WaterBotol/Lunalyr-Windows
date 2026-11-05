@@ -21,6 +21,6 @@ dotnet publish app/Lunalyr.csproj -c Release -r win-x64 --self-contained true -o
 ./scripts/smoke.ps1 -Exe artifacts/win-x64/Lunalyr.exe
 ```
 
-The smoke test uses a temporary app profile and a local mixed-timing lyric fixture. It captures the Settings WebView, wallpaper WebView and actual Windows desktop. Build the per-user installer with Inno Setup 6 using `installer/Lunalyr.iss` after publishing. The GitHub workflow packages both formats without creating a release.
+The smoke test uses a temporary app profile, publishes a Windows media session and loads a local mixed-timing lyric fixture. It captures the Settings WebView, wallpaper WebView and actual Windows desktop. Build the per-user installer with Inno Setup 6 using `installer/Lunalyr.iss` after publishing. The GitHub workflow packages both formats without creating a release.
 
 [Project licence](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

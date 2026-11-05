@@ -362,7 +362,7 @@ function timingPage() {
 function readingPage() {
   return [group('Pronunciation readings',
     select('Romanisation', 'reading', [['off', 'Off'], ['below', 'Below lyrics'], ['replace', 'Replace lyrics']]),
-    caption('Uses pronunciation readings supplied by the selected lyric source or paired local export.'))];
+    caption('Uses readings from the lyric source first. When absent, Lunalyr can generate Korean and Japanese readings locally.'))];
 }
 function players() {
   const items = state.players.map(player => [player, player.split('!').at(-1)]);

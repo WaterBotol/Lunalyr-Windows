@@ -38,6 +38,22 @@ try
 }
 catch (System.Xml.XmlException) { }
 
+Assert(Pronunciation.Korean("한국어 같이 국물 신라") == "hangugeo gachi gungmul silla", "Hangul liaison and assimilation.");
+Assert(Pronunciation.Kana("きょう スーパー まっちゃ") == "kyou suupaa matcha", "Kana combinations, long vowels and gemination.");
+
+var yaml = LyricParser.Parse("""
+    metadata: {offset_ms: 500}
+    lines:
+      - text: Hold on
+        start_ms: 1000
+        end_ms: 2000
+        words:
+          - {text: Hold, start_ms: 1000}
+          - {text: on, start_ms: 1500}
+    """, ".yaml", 10);
+Assert(yaml[0].Start == 1.5 && yaml[0].Words[0].End == 2 && yaml[0].Words[1].End == 2.5,
+    "YAML retains verified lyric timing and file offset.");
+
 var track = new Track("Under the stars", "Tides & Clouds", "", 190, "fixture");
 Assert(LyricLookup.Match(track, "Under the Stars", "Tides", 192), "Equivalent metadata matches.");
 Assert(!LyricLookup.Match(track, "Under the Stars (live)", "Tides", 190), "Reject mismatched titles.");

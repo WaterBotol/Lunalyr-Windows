@@ -1,0 +1,4 @@
+* text=auto
+app/Web/engines/** -text -whitespace
+app/Web/licenses/** -text -whitespace
+vendor/** -text -whitespace
