@@ -198,11 +198,13 @@ internal sealed class Controller : ApplicationContext
             await UpdateDesktop();
             var power = SystemInformation.PowerStatus.PowerLineStatus;
             bool lowPower = preferences.LowPower || (preferences.RespectBattery && power == PowerLineStatus.Offline);
-            bool wantsAudio = !locked && !lowPower && preferences.Background == "visualiser" && preferences.Audio;
+            bool wantsAudio = !locked && !lowPower && preferences.Audio
+                && (preferences.Background == "visualiser" || preferences.TextColour == "musicReactive");
             if (audioWanted != wantsAudio)
             {
                 audioWanted = wantsAudio;
-                if (wantsAudio) audio.Start(); else audio.Stop();
+                if (wantsAudio) audio.Start();
+                else { audio.Stop(); SendAll("audio", new AudioFrame()); }
             }
             SendAll("status", new { notice, audio = audio.Status, lowPower, desktop = desktop.Count, lookup = lookupStatus });
         }
@@ -285,7 +287,13 @@ internal sealed class Controller : ApplicationContext
             }
             if (!cache.TryGetValue(cacheKey, out var found))
             {
-                found = await lookup.Find(track, options, lyricsFolder, token);
+                found = await lookup.Find(track, options, lyricsFolder, token, foundSoFar =>
+                {
+                    if (token.IsCancellationRequested || shuttingDown) return;
+                    candidates = foundSoFar;
+                    lookupStatus = "";
+                    SendLyrics();
+                });
                 if (token.IsCancellationRequested || shuttingDown) return;
                 if (found.Length > 0)
                 {
@@ -388,7 +396,10 @@ internal sealed class Controller : ApplicationContext
                 case "done": Apply(preferences with { Onboarded = true }); onboarding?.Hide(); ShowSettings(); break;
                 case "reconnect": if (audioWanted) { audio.Stop(); audio.Start(); } break;
                 case "copyText": if (value.GetString() is { Length: > 0 and <= 12000 } text) Clipboard.SetText(text); break;
-                case "copyCard": CopyCard(value.GetString()); break;
+                case "copyCard":
+                    CopyCard(value.GetString());
+                    view.Send("notice", "Animated lyric card copied.");
+                    break;
                 case "releases": Process.Start(new ProcessStartInfo("https://github.com/WaterBotol/Lunalyr-Windows/releases") { UseShellExecute = true }); break;
                 case "quit": ExitThread(); break;
             }
@@ -467,16 +478,14 @@ internal sealed class Controller : ApplicationContext
         if (new FileInfo(dialog.FileName).Length > 500_000_000) throw new FormatException("Choose a wallpaper under 500 MB.");
         string name = Guid.NewGuid().ToString("N") + extension;
         File.Copy(dialog.FileName, Path.Combine(mediaFolder, name));
-        string? old = preferences.Wallpaper;
         Apply(preferences with { Wallpaper = name, Background = "custom" });
-        if (old is not null && Path.GetFileName(old) == old) File.Delete(Path.Combine(mediaFolder, old));
     }
 
     private void CopyCard(string? base64)
     {
-        if (base64 is null || base64.Length > 12_000_000) return;
+        if (base64 is null || base64.Length > 12_000_000) throw new FormatException("The card exceeds the clipboard size limit.");
         byte[] bytes = Convert.FromBase64String(base64);
-        if (bytes.Length < 7 || !bytes.AsSpan(0, 6).SequenceEqual("GIF89a"u8)) return;
+        if (bytes.Length < 7 || !bytes.AsSpan(0, 6).SequenceEqual("GIF89a"u8)) throw new FormatException("The card is not a GIF.");
         var folder = Path.Combine(root, "Cards");
         Directory.CreateDirectory(folder);
         foreach (string stale in Directory.EnumerateFiles(folder, "*.gif").Where(path => File.GetLastWriteTimeUtc(path) < DateTime.UtcNow.AddDays(-7)))
@@ -499,7 +508,33 @@ internal sealed class Controller : ApplicationContext
         preferences = preferences with { Onboarded = true, PauseCovered = false };
         for (int i = 0; !settings!.Ready && i < 120; i++) await Task.Delay(100);
         if (!settings!.Ready) throw new InvalidOperationException("Settings did not start its WebView.");
-        playback = new Playback(new Track("Golden Hour Static", "Lunar Tides", "", 45, "Fixture"), 3, false, null, true, true, true);
+        using var testPlayer = new Windows.Media.Playback.MediaPlayer();
+        testPlayer.CommandManager.IsEnabled = false;
+        var controls = testPlayer.SystemMediaTransportControls;
+        controls.IsEnabled = controls.IsPlayEnabled = controls.IsPauseEnabled = true;
+        controls.DisplayUpdater.Type = Windows.Media.MediaPlaybackType.Music;
+        controls.DisplayUpdater.MusicProperties.Title = "Golden Hour Static";
+        controls.DisplayUpdater.MusicProperties.Artist = "Lunar Tides";
+        controls.DisplayUpdater.Update();
+        controls.PlaybackStatus = Windows.Media.MediaPlaybackStatus.Playing;
+        controls.UpdateTimelineProperties(new Windows.Media.SystemMediaTransportControlsTimelineProperties
+        {
+            StartTime = TimeSpan.Zero, MinSeekTime = TimeSpan.Zero,
+            EndTime = TimeSpan.FromSeconds(45), MaxSeekTime = TimeSpan.FromSeconds(45), Position = TimeSpan.FromSeconds(5.6)
+        });
+
+        for (int i = 0; i < 24; i++)
+        {
+            var live = await media.Read("");
+            if (live.Track?.Title == "Golden Hour Static" && live.Track.Artist == "Lunar Tides" && live.Playing)
+            {
+                playback = live with { Playing = false };
+                break;
+            }
+            await Task.Delay(250);
+        }
+        if (playback.Track is null) throw new InvalidOperationException("Windows did not report the test media session.");
+        Log($"Windows media session read: {playback.Track.Title}, {playback.Position:F2}s.");
         const string fixture = "[00:00.00]<00:00.00>Every <00:02.00>word, <00:04.00>in time\n[00:08.00]with the music";
         candidates = [new Lyrics("local", LyricParser.Lrc(fixture, 45))];
         SendAll("playback", new { playback, players = new[] { "Fixture" } });

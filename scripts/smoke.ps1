@@ -7,6 +7,7 @@ $path = (Resolve-Path $Exe).Path
 $null = New-Item -Path $Output -ItemType Directory -Force
 $outputPath = (Resolve-Path $Output).Path
 Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Out-File "$outputPath/os.txt"
+if ($env:GITHUB_ACTIONS -eq "true") { (New-Object -ComObject Shell.Application).MinimizeAll() }
 $app = Start-Process -FilePath $path -ArgumentList "--smoke", "`"$outputPath`"" -PassThru
 try {
   if (-not $app.WaitForExit(75000)) { throw "Lunalyr did not finish the fixture smoke test." }

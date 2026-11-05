@@ -67,7 +67,9 @@ internal sealed class Surface : Form
             string json = args.WebMessageAsJson;
             if (json.Length > 12_100_000) return;
             using var parsed = JsonDocument.Parse(json);
-            if (parsed.RootElement.TryGetProperty("type", out var type) && type.GetString() == "ready") ready = true;
+            if (parsed.RootElement.ValueKind != JsonValueKind.Object
+                || !parsed.RootElement.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String) return;
+            if (type.GetString() == "ready") ready = true;
             Message?.Invoke(this, parsed.RootElement.Clone());
         };
         core.Navigate(Origin + "index.html?surface=" + Role);

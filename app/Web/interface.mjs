@@ -103,7 +103,7 @@ function field(label, input, note) {
   return element('label', { class: 'field' }, element('span', {}, label, note && text(note, 'caption')), input);
 }
 function toggle(label, key, note, accessor) {
-  const input = element('input', { type: 'checkbox', role: 'switch' });
+  const input = element('input', { type: 'checkbox', role: 'switch', 'aria-label': label });
   const get = accessor?.get ?? (() => !!state.preferences[key]);
   const set = accessor?.set ?? (value => preference(key, value));
   bind(input, () => { input.checked = get(); });
@@ -111,7 +111,7 @@ function toggle(label, key, note, accessor) {
   return field(label, input, note);
 }
 function select(label, key, items, access) {
-  const input = element('select');
+  const input = element('select', { 'aria-label': label });
   for (const [value, name] of items) input.append(element('option', { value }, name));
   const get = access?.get ?? (() => state.preferences[key]);
   const set = access?.set ?? (value => preference(key, value));
@@ -133,7 +133,7 @@ function range(label, key, min, max, increment, format, access) {
   return field(label, element('span', { class: 'range' }, input, output));
 }
 function colour(label, key) {
-  const input = element('input', { type: 'color' });
+  const input = element('input', { type: 'color', 'aria-label': label });
   bind(input, () => { input.value = state.preferences[key]; });
   input.addEventListener('change', () => preference(key, input.value));
   return field(label, input);

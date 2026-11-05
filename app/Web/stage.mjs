@@ -1,6 +1,6 @@
 import { albumGrid, clamp, cueAt, fallback, hash, mix, noise, rgb, smooth, typography, wordState, arrivalFor } from './score.mjs';
 import { field, lines, ribbons, starTrails, strata, tunnel } from './effects.mjs';
-import { Ambient, effectNames } from './gpu.mjs';
+import { GpuScene, effectNames } from './gpu.mjs';
 
 export const demo = {
   track: { title: 'Golden Hour Static', artist: 'Lunar Tides', key: 'fixture', duration: 16 },
@@ -59,7 +59,7 @@ export class Stage {
     cancelAnimationFrame(this.animation);
     this.image?.remove();
     this.engine?.remove();
-    this.ambient?.dispose();
+    this.gpu?.dispose();
   }
   updateArtwork(artwork, now) {
     if (artwork === this.artwork) return;
@@ -119,17 +119,21 @@ export class Stage {
     field(context, w, h, palette, t, p);
     if (background === 'patterns') lines(context, w, h, palette, t, p.pattern);
     if (background === 'effects') {
-      this.ambient ??= new Ambient(this.element, this.ink, this.preview);
+      this.gpu ??= new GpuScene(this.element, this.ink, this.preview);
       const styles = Object.keys(effectNames);
       const effect = p.effect === 'auto' ? styles[trackSeed % styles.length] : p.effect;
-      if (!this.ambient.draw(effect, w, h, this.elapsed, p, palette)) ribbons(context, w, h, palette, t, null, p, 'silk');
-    } else this.ambient?.hide();
-    if (background === 'visualiser' && !engine) {
-      if (p.visualiser === 'starTrails') starTrails(context, w, h, palette, t, audio, p);
-      else if (p.visualiser === 'tunnel') tunnel(context, w, h, palette, t, audio, p);
-      else if (p.visualiser === 'colourStrata' || p.visualiser === 'overprint') strata(context, w, h, palette, t, audio, p, p.visualiser);
-      else ribbons(context, w, h, palette, t, audio, p, p.visualiser);
-    }
+      if (!this.gpu.draw(effect, w, h, this.elapsed, p, palette)) ribbons(context, w, h, palette, t, null, p, 'silk');
+    } else if (background === 'visualiser' && !engine) {
+      this.gpu ??= new GpuScene(this.element, this.ink, this.preview);
+      if (p.visualiser === 'starTrails') {
+        this.gpu.hide();
+        starTrails(context, w, h, palette, t, audio, p);
+      } else if (!this.gpu.draw(p.visualiser, w, h, this.elapsed, p, palette, { audio, calm, artwork: !!this.artwork })) {
+        if (p.visualiser === 'tunnel') tunnel(context, w, h, palette, t, audio, p);
+        else if (p.visualiser === 'colourStrata' || p.visualiser === 'overprint') strata(context, w, h, palette, t, audio, p, p.visualiser);
+        else ribbons(context, w, h, palette, t, audio, p, p.visualiser);
+      }
+    } else this.gpu?.hide();
 
     const draw = this.inkContext;
     draw.setTransform(ratio, 0, 0, ratio, 0, 0);
@@ -137,7 +141,9 @@ export class Stage {
     const track = this.state.playback?.track ?? (this.preview ? demo.track : null);
     const selected = this.state.lyrics?.selected ?? (this.preview && !this.state.playback?.track ? demo.lyrics : null);
     const time = (track === demo.track ? now / 1000 % 16 : position(this.state, now)) - (this.state.lyrics?.offset ?? 0);
-    if (p.lyricsVisible) paintLyrics(draw, w, h, selected, time, track, { ...p, calm }, palette, this.elapsed, audio, this.preview);
+    if (p.lyricsVisible) paintLyrics(draw, w, h, selected, time, track, {
+      ...p, calm, searching: this.state.lyrics?.lookup === 'Looking for lyrics…'
+    }, palette, this.elapsed, audio, this.preview);
     if (p.darkening !== 1) {
       draw.globalCompositeOperation = 'destination-over';
       draw.fillStyle = p.darkening > 1 ? `rgb(0 0 0 / ${clamp((p.darkening - 1) * .45)})` : `rgb(255 255 255 / ${clamp((1 - p.darkening) * .1)})`;
@@ -256,7 +262,7 @@ export function paintLyrics(context, w, h, selected, time, track, p, palette, cl
       text(context, '♪', w / 2, h * .45, base, p, rgb(theme.end, .58), false, p.scrim);
       if (gap < 25) text(context, `Lyrics return in ${Math.ceil(gap)} s`, w / 2, h * .56, small, p, rgb(theme.end, .58), false, p.scrim);
     } else if (!selected && track && p.missingLyrics !== 'nothing') {
-      const label = p.missingLyrics === 'track' ? track.title : 'Lyrics unavailable';
+      const label = p.searching ? 'Looking for lyrics…' : p.missingLyrics === 'track' ? track.title : 'Lyrics unavailable';
       const size = Math.max(12, Math.min(base * .64, base * maxWidth / Math.max(1, measure(context, label, base, p))));
       text(context, label, w / 2, h / 2, size, p, rgb(theme.end, .65), false, p.scrim);
     }

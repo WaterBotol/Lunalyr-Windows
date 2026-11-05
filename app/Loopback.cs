@@ -5,7 +5,7 @@ using NAudio.Wave;
 namespace Lunalyr;
 
 internal sealed record AudioFrame(double Bass = 0, double Mid = 0, double Treble = 0, double Level = 0,
-    double Beat = 0, double Flux = 0, double[]? Spectrum = null, string? Pcm = null, int SampleRate = 0);
+    double Beat = 0, double Flux = 0, double[]? Spectrum = null, string? Pcm = null, int SampleRate = 0, float[]? Wave = null);
 
 internal sealed class Loopback : IDisposable
 {
@@ -152,7 +152,7 @@ internal sealed class Loopback : IDisposable
             encoded = Convert.ToBase64String(MemoryMarshal.AsBytes(shorts.AsSpan()));
         }
         return new AudioFrame(Peak(25, 240), Peak(240, 2800), Peak(2800, 12000), level, Math.Min(1, flux * 5), flux,
-            spectrum, encoded, rate);
+            spectrum, encoded, rate, Enumerable.Range(0, 256).Select(i => pcm[i * Size / 256]).ToArray());
     }
 
     public void Dispose() => Stop();

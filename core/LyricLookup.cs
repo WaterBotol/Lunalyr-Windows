@@ -17,7 +17,8 @@ public sealed class LyricLookup(HttpClient http)
         ["lrclib"] = "LRCLIB", ["qq"] = "QQ Music", ["kugou"] = "Kugou", ["kuwo"] = "Kuwo", ["ovh"] = "lyrics.ovh"
     };
 
-    public async Task<Lyrics[]> Find(Track track, Preferences preferences, string localFolder, CancellationToken token)
+    public async Task<Lyrics[]> Find(Track track, Preferences preferences, string localFolder, CancellationToken token,
+        Action<Lyrics[]>? progress = null)
     {
         string[] sources = preferences.Sources.Where(source => !preferences.DisabledSources.Contains(source)).Distinct().ToArray();
         if (preferences.LookupPolicy == "order" && !preferences.PreferWords)
@@ -29,8 +30,25 @@ public sealed class LyricLookup(HttpClient http)
             }
             return [];
         }
-        var matches = await Task.WhenAll(sources.Select(source => FindOne(source, track, preferences.LyricsFolder ?? localFolder, token)));
-        return matches.OfType<Lyrics>().OrderByDescending(match => match.Quality).ToArray();
+        var folder = preferences.LyricsFolder ?? localFolder;
+        var pending = sources.Select((source, order) => FindRanked(source, order)).ToList();
+        var matches = new List<(Lyrics Match, int Order)>();
+        Lyrics[] ordered = [];
+        while (pending.Count > 0)
+        {
+            var completed = await Task.WhenAny(pending);
+            pending.Remove(completed);
+            var (match, order) = await completed;
+            if (match is null) continue;
+            matches.Add((match, order));
+            ordered = matches.OrderByDescending(row => row.Match.Quality).ThenBy(row => row.Order)
+                .Select(row => row.Match).ToArray();
+            progress?.Invoke(ordered);
+        }
+        return ordered;
+
+        async Task<(Lyrics? Match, int Order)> FindRanked(string source, int order) =>
+            (await FindOne(source, track, folder, token), order);
     }
 
     private async Task<Lyrics?> FindOne(string source, Track track, string localFolder, CancellationToken token)

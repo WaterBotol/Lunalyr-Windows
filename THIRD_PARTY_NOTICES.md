@@ -8,3 +8,4 @@ Lunalyr for Windows is a port of [Lunalyr for macOS](https://github.com/WaterBot
 - [NAudio](https://github.com/naudio/NAudio) is MIT licensed. [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) ships under Microsoft's WebView2 SDK and Runtime terms.
 - [Manrope](https://github.com/google/fonts/tree/main/ofl/manrope) is bundled under the [SIL Open Font License](app/Web/licenses/Manrope-OFL.txt).
 - The WebGL ambient shaders derive from the macOS app's `Sources/UI/Shaders.metal` at the reference revision. They are covered by the project licence.
+- [Synesthia](vendor/Synesthia/SOURCE.md) by Jon Jaques and [Fosfora Aurora](vendor/Fosfora/SOURCE.md) by Kevin Raymond contributed audio-reactive shader code. Their MIT licences are in [Synesthia-LICENSE.txt](app/Web/licenses/Synesthia-LICENSE.txt) and [Fosfora-LICENSE.txt](app/Web/licenses/Fosfora-LICENSE.txt).
