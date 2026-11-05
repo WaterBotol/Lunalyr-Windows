@@ -1,0 +1,29 @@
+diff --git a/components/scene/WavecoreCanvas.tsx b/components/scene/WavecoreCanvas.tsx
+--- a/components/scene/WavecoreCanvas.tsx
++++ b/components/scene/WavecoreCanvas.tsx
+@@ -3,6 +3,8 @@
+ import { Canvas } from "@react-three/fiber";
++import type { RootState } from "@react-three/fiber";
+ import { useCallback, useEffect, useRef, useState } from "react";
+ import * as THREE from "three";
+ import { useAudio } from "@/lib/audio/provider";
++import { connectWavecore } from "@/lunalyr-clock";
+ import { Scene } from "./Scene";
+
+@@ -28,4 +30,5 @@
+-  const handleCreated = useCallback(({ gl }: { gl: THREE.WebGLRenderer }) => {
++  const handleCreated = useCallback((state: RootState) => {
++    const { gl } = state;
+     // The postprocessing composer forces this anyway; setting it explicitly
+@@ -33,3 +36,4 @@
+     gl.setClearColor(0x04050a, 1);
+     glRef.current = gl;
++    connectWavecore(state);
+
+@@ -106,5 +110,3 @@
+           onError={() => setFailed(true)}
+-          // The scene animates continuously; there is no idle state worth saving
+-          // frames for, and a paused loop would freeze the visuals.
+-          frameloop="always"
++          frameloop="never"
+           role="img"

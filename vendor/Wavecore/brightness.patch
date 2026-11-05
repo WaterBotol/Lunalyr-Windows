@@ -1,0 +1,47 @@
+diff --git a/components/scene/Effects.tsx b/components/scene/Effects.tsx
+--- a/components/scene/Effects.tsx
++++ b/components/scene/Effects.tsx
+@@ -59,8 +59,7 @@
+
+   useFrame(() => {
+-    // Bloom breathes with overall amplitude, plus a hard shove on punch so a
+-    // kick produces a visible flash rather than just a colour shift.
++    // Let highlights breathe without a large exposure jump behind lyrics.
+     if (bloom.current) {
+-      bloom.current.intensity = 0.4 + reactive.level * 0.7 + reactive.punch * 0.5;
++      bloom.current.intensity = 0.16 + reactive.level * 0.30 + reactive.punch * 0.08;
+     }
+
+@@ -85,9 +84,9 @@
+       <Bloom
+         ref={instanceRef(bloom)}
+-        intensity={0.8}
++        intensity={0.25}
+         // Higher than a typical bloom setup: only the core crests and the
+         // densest particle bands should bloom. Lowering this is the fastest way
+         // to wash the whole frame out to grey.
+-        luminanceThreshold={0.34}
++        luminanceThreshold={0.46}
+         luminanceSmoothing={0.3}
+         mipmapBlur
+diff --git a/components/scene/shaders/core.ts b/components/scene/shaders/core.ts
+--- a/components/scene/shaders/core.ts
++++ b/components/scene/shaders/core.ts
+@@ -174,10 +174,13 @@
+   // is the entire subject. Measured target for the centre of the frame during
+   // playback is a bright-but-structured ~0.5–0.7, not 1.0.
+-  color *= 0.26 + uLevel * 0.85;
++  color *= 0.26 + uLevel * 0.64;
+
+-  // Punch adds a brief white-hot flash across the whole core.
+-  color += (hot + vec3(0.25)) * uPunch * 0.16;
++  color += hot * uPunch * 0.04;
+
+-  gl_FragColor = vec4(color, 1.0);
++  // Smoothly compress the hottest highlights and retain their colour.
++  float peak = max(color.r, max(color.g, color.b));
++  float shoulder = max(0.0, peak - 0.55);
++  float rolled = peak - shoulder + 0.25 * (1.0 - exp(-shoulder / 0.25));
++  gl_FragColor = vec4(color * (rolled / max(0.0001, peak)), 1.0);
+ }
+ `;

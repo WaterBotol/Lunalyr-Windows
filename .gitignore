@@ -1,27 +1,6 @@
-# Rust
-/target/
-/target-*/
-**/*.rs.bk
-
-# Node / Vite
-node_modules/
-/dist/
-*.local
-
-# Tauri generated
-/src-tauri/gen/schemas/
-/src-tauri/WixTools/
-
-# Editors / OS
 .DS_Store
-.vscode/*
-!.vscode/extensions.json
-.idea/
-Thumbs.db
-
-# Test output
-/coverage/
-/test-results/
-
-# Local tool configuration
-/.claude/
+**/bin/
+**/obj/
+artifacts/
+node_modules/
+TestResults/
