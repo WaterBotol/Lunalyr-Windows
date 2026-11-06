@@ -67,8 +67,7 @@ public sealed class LyricLookup(HttpClient http)
                 "qq" => await Qq(track, ct),
                 "kugou" => await Kugou(track, ct),
                 "kuwo" => await Kuwo(track, ct),
-                "ovh" when track.Artist.Length > 0 => Make("ovh", LyricParser.Plain(
-                    String(await Get("https://api.lyrics.ovh/v1/" + Escape(track.Artist) + "/" + Escape(track.Title), ct), "lyrics"))),
+                "ovh" when track.Artist.Length > 0 => await Ovh(track, ct),
                 _ => null
             };
         }
@@ -124,18 +123,66 @@ public sealed class LyricLookup(HttpClient http)
 
     private async Task<Lyrics?> LrcLib(Track track, CancellationToken ct)
     {
-        var results = await Get("https://lrclib.net/api/search", ct, null, ("track_name", track.Title), ("artist_name", track.Artist));
-        var matches = Array(results).Where(row => Match(track, String(row, "trackName"), String(row, "artistName"), Number(row, "duration")))
+        const string api = "https://lrclib.net/api/";
+        string title = LookupTitle(track.Title, track.Artist);
+        var fields = new List<(string, string)> { ("track_name", title) };
+        if (track.Artist.Length > 0) fields.Add(("artist_name", track.Artist));
+        var rows = new List<JsonNode?>();
+        if (track.Artist.Length > 0 && track.Duration > 0)
+        {
+            var exactFields = new List<(string, string)>(fields) { ("duration", Invariant(track.Duration)) };
+            if (track.Album.Length > 0) exactFields.Add(("album_name", track.Album));
+            using var exactDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            exactDeadline.CancelAfter(TimeSpan.FromSeconds(2));
+            try { rows.Add(await Get(api + "get", exactDeadline.Token, null, exactFields.ToArray())); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            catch (Exception error) when (error is HttpRequestException or JsonException or IOException) { }
+        }
+        var exact = Best(rows);
+        if (exact?.Quality == 4) return exact;
+        await Search(fields.ToArray());
+        var best = Best(rows);
+        if (best?.Quality >= 2 || track.Artist.Length == 0) return best;
+        await Search([("q", Query(track))]);
+        return Best(rows);
+
+        async Task Search((string, string)[] parameters)
+        {
+            using var searchDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            searchDeadline.CancelAfter(TimeSpan.FromSeconds(3));
+            try { rows.AddRange(Array(await Get(api + "search", searchDeadline.Token, null, parameters))); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            catch (Exception error) when (error is HttpRequestException or JsonException or IOException) { }
+        }
+
+        Lyrics? Best(IEnumerable<JsonNode?> entries) => entries
+            .Where(row => Match(track, String(row, "trackName"), String(row, "artistName"), Number(row, "duration")))
             .OrderBy(row => Difference(track.Duration, Number(row, "duration")))
-            .Take(5).Select(row => Flag(row, "instrumental") ? new Lyrics("lrclib", [], true)
-                : Make("lrclib", LyricParser.Lrc(String(row, "syncedLyrics"), track.Duration))
-                    ?? Make("lrclib", LyricParser.Plain(String(row, "plainLyrics"))));
-        return matches.OfType<Lyrics>().OrderByDescending(row => row.Quality).FirstOrDefault();
+            .ThenByDescending(row => Normalize(String(row, "albumName")) == Normalize(track.Album))
+            .Select(Read).OfType<Lyrics>().OrderByDescending(row => row.Quality).FirstOrDefault();
+
+        Lyrics? Read(JsonNode? row)
+        {
+            if (Flag(row, "instrumental")) return new Lyrics("lrclib", [], true);
+            if (String(row, "lyricsfile") is { Length: > 0 } file)
+            {
+                try
+                {
+                    if (Make("lrclib", LyricParser.Parse(file, ".yaml", track.Duration)) is { } timed) return timed;
+                }
+                catch (Exception error) when (error is YamlDotNet.Core.YamlException or FormatException) { }
+            }
+            return Make("lrclib", LyricParser.Lrc(String(row, "syncedLyrics"), track.Duration))
+                ?? Make("lrclib", LyricParser.Plain(String(row, "plainLyrics")));
+        }
     }
 
     private async Task<Lyrics?> LyricsPlus(Track track, CancellationToken ct)
     {
-        string[] hosts = ["https://lyricsplus.prjktla.workers.dev", "https://lyricsplus.binimum.org", "https://lyricsplus.prjktla.my.id"];
+        string[] hosts = ["https://lyricsplus.binimum.org", "https://lyricsplus.prjktla.workers.dev", "https://lyricsplus.prjktla.my.id"];
+        var fields = new List<(string, string)> { ("title", LookupTitle(track.Title, track.Artist)), ("artist", track.Artist) };
+        if (track.Album.Length > 0) fields.Add(("album", track.Album));
+        if (track.Duration > 0) fields.Add(("duration", track.Duration.ToString("0.###", CultureInfo.InvariantCulture)));
         foreach (string host in hosts)
         {
             using var mirrorDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -143,14 +190,13 @@ public sealed class LyricLookup(HttpClient http)
             JsonNode? result;
             try
             {
-                result = await Get(host + "/v2/lyrics/get", mirrorDeadline.Token, null, ("title", track.Title),
-                    ("artist", track.Artist), ("album", track.Album), ("duration", Invariant(track.Duration)));
+                result = await Get(host + "/v2/lyrics/get", mirrorDeadline.Token, null, fields.ToArray());
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { continue; }
             catch (Exception error) when (error is HttpRequestException or JsonException or IOException) { continue; }
             var meta = Value(result, "metadata");
             if (String(meta, "title") is { Length: > 0 } title && !Match(track, title, String(meta, "artist"), 0)) continue;
-            var lines = Array(Value(result, "lyrics")).Select(row =>
+            var lines = Array(Value(result, "lyrics")).Where(row => Value(row, "time") is not null).Select(row =>
             {
                 double start = Number(row, "time") / 1000;
                 double end = start + Number(row, "duration") / 1000;
@@ -169,8 +215,8 @@ public sealed class LyricLookup(HttpClient http)
                     priorSpace = char.IsWhiteSpace(raw[^1]);
                 }
                 return new Line(String(row, "text").Trim(), start, end, words.ToArray());
-            }).Where(row => row.Text.Length > 0 && row.End > row.Start).OrderBy(row => row.Start).ToArray();
-            if (Make("lyricsplus", lines) is { } match) return match;
+            }).Where(row => row.Text.Length > 0).ToList();
+            if (Make("lyricsplus", LyricParser.FinalizeLines(lines, track.Duration)) is { } match) return match;
         }
         return null;
     }
@@ -180,7 +226,8 @@ public sealed class LyricLookup(HttpClient http)
         const string referer = "https://music.163.com/";
         var search = await Get(referer + "api/search/get", ct, referer, ("s", Query(track)), ("type", "1"), ("limit", "8"));
         var songs = Array(Value(Value(search, "result"), "songs"))
-            .Where(row => Match(track, String(row, "name"), Artists(row, "artists"), Number(row, "duration") / 1000))
+            .Where(row => Array(Value(row, "alias")).Select(alias => alias?.ToString() ?? "").Prepend(String(row, "name"))
+                .Any(title => Match(track, title, Artists(row, "artists"), Number(row, "duration") / 1000)))
             .OrderBy(row => Difference(track.Duration, Number(row, "duration") / 1000)).Take(2);
         foreach (var row in songs)
         {
@@ -264,6 +311,17 @@ public sealed class LyricLookup(HttpClient http)
         return null;
     }
 
+    private async Task<Lyrics?> Ovh(Track track, CancellationToken ct)
+    {
+        string title = LookupTitle(track.Title, track.Artist);
+        foreach (string artist in new[] { track.Artist, PrimaryArtist(track.Artist) }.Distinct())
+        {
+            var result = await Get("https://api.lyrics.ovh/v1/" + Escape(artist) + "/" + Escape(title), ct);
+            if (Make("ovh", LyricParser.Plain(String(result, "lyrics"))) is { } match) return match;
+        }
+        return null;
+    }
+
     private async Task<JsonNode?> Get(string url, CancellationToken ct, string? referer = null,
         params (string Name, string Value)[] parameters)
     {
@@ -309,7 +367,8 @@ public sealed class LyricLookup(HttpClient http)
 
     public static bool Match(Track track, string title, string artist, double duration)
     {
-        string expected = Normalize(track.Title), candidate = Normalize(title);
+        string expected = Normalize(LookupTitle(track.Title, track.Artist));
+        string candidate = Normalize(LookupTitle(title, artist));
         if (expected.Length == 0 || candidate != expected) return false;
         string expectedArtist = Normalize(track.Artist), candidateArtist = Normalize(artist);
         if (expectedArtist.Length > 0 && candidateArtist.Length > 0 && expectedArtist != candidateArtist
@@ -317,12 +376,24 @@ public sealed class LyricLookup(HttpClient http)
         return duration <= 0 || track.Duration <= 0 || Math.Abs(duration - track.Duration) <= Math.Clamp(track.Duration * .04, 5, 12);
     }
 
-    private static IEnumerable<string> ArtistParts(string value) => Regex.Split(value, @"\s+(?:feat\.?|ft\.?|and|&)\s+|[,;]", RegexOptions.IgnoreCase)
-        .Select(Normalize).Where(s => s.Length > 0);
+    private static string LookupTitle(string value, string artist)
+    {
+        string[] parts = value.Split(" - ", 2);
+        if (parts.Length == 2 && artist.Length > 0 && ArtistParts(artist).Append(Normalize(artist)).Contains(Normalize(parts[0])))
+            value = parts[1];
+        // Keep version qualifiers such as Live, Remix and Radio Edit.
+        return Regex.Replace(value,
+            @"(?:\s*(?:[\[(](?:(?:feat\.?|ft\.?|featuring)\s+[^\])]+|(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?)[\])]|\s-\s(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?)\s*)+$",
+            "", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking).Trim();
+    }
+    private static string[] SplitArtists(string value) => Regex.Split(value,
+        @"\s+(?:feat\.?|ft\.?|featuring|and|&|×|x|/)\s+|[,;，、]", RegexOptions.IgnoreCase);
+    private static IEnumerable<string> ArtistParts(string value) => SplitArtists(value).Select(Normalize).Where(s => s.Length > 0);
+    private static string PrimaryArtist(string value) => SplitArtists(value).FirstOrDefault(part => !string.IsNullOrWhiteSpace(part))?.Trim() ?? value;
     private static string Normalize(string value) => string.Concat(value.Normalize(NormalizationForm.FormKC).ToLowerInvariant()
         .EnumerateRunes().Where(Rune.IsLetterOrDigit).Select(rune => rune.ToString()));
     private static double Difference(double a, double b) => a <= 0 || b <= 0 ? double.MaxValue : Math.Abs(a - b);
-    private static string Query(Track track) => (track.Title + " " + track.Artist).Trim();
+    private static string Query(Track track) => (LookupTitle(track.Title, track.Artist) + " " + PrimaryArtist(track.Artist)).Trim();
     private static string Escape(string value) => Uri.EscapeDataString(value);
     private static string Invariant(double value) => Math.Round(value).ToString(CultureInfo.InvariantCulture);
     private static JsonNode? Value(JsonNode? node, string key) => node is JsonObject item ? item[key] : null;

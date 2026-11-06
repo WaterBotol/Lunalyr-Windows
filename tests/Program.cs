@@ -56,8 +56,23 @@ Assert(yaml[0].Start == 1.5 && yaml[0].Words[0].End == 2 && yaml[0].Words[1].End
 
 var track = new Track("Under the stars", "Tides & Clouds", "", 190, "fixture");
 Assert(LyricLookup.Match(track, "Under the Stars", "Tides", 192), "Equivalent metadata matches.");
+Assert(LyricLookup.Match(track, "Tides - Under the Stars (feat. Clouds) - 2011 Remaster", "Tides", 192),
+    "Credits and remaster tags do not hide the same recording.");
 Assert(!LyricLookup.Match(track, "Under the Stars (live)", "Tides", 190), "Reject mismatched titles.");
+Assert(!LyricLookup.Match(track, "Under the Stars", "Other Artist", 190), "Reject unrelated artists.");
 Assert(!LyricLookup.Match(track, "Under the Stars", "Tides", 245), "Reject mismatched durations.");
+
+var clock = new PlaybackClock();
+double rate = PlaybackClock.Rate(0);
+Assert(rate == 1 && PlaybackClock.Rate(double.NaN) == 1, "Invalid media rates use normal speed.");
+Assert(clock.Update(true, 5, 0, 0, true, rate) == 5, "Clock starts from the reported position.");
+Assert(clock.Update(false, 5, 0, 500, true, rate) == 5.5, "Repeated reports keep advancing.");
+Assert(clock.Update(false, 5, 0, 1000, false, rate) == 6, "Pausing keeps the extrapolated position.");
+Assert(clock.Update(false, 5, 0, 1500, false, rate) == 6, "Paused time does not advance.");
+Assert(clock.Update(false, 5, 0, 2500, true, 2) == 6, "Resuming keeps the paused position.");
+Assert(clock.Update(false, 5, 0, 3000, true, 2) == 7, "Playback uses the real rate.");
+Assert(clock.Update(false, 2, .25, 3500, true, 2) == 2.5, "A fresh seek corrects the clock.");
+Assert(clock.Update(true, 0, 0, 4000, true, rate) == 0, "A new track resets the clock.");
 string temp = Path.Combine(Path.GetTempPath(), "lunalyr-test-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
 try
@@ -74,6 +89,11 @@ try
         "Prefer verified word timing to line timing.");
     sources = await lyrics.Find(track, new Preferences { Sources = ["local", "lrclib"], LookupPolicy = "order", PreferWords = false }, temp, default);
     Assert(sources.Length == 1 && sources[0].Source == "local", "Strict source order respects the first source.");
+    var decorated = new Track("Tides - Back Again (feat. Clouds)", "Tides, Clouds", "Evening", 0, "fixture");
+    sources = await lyrics.Find(decorated, new Preferences { Sources = ["lrclib", "lyricsplus"] }, temp, default);
+    Assert(sources is [{ Source: "lrclib", Quality: 4 }, { Source: "lyricsplus", Quality: 2 }],
+        "Find enhanced LRCLIB lyrics via a broader query and keep Lyrics+ lines without explicit durations.");
+    Assert(sources[1].Lines[0].End == 5 && sources[1].Lines[1].Start == 5, "Lyrics+ uses the next timestamp for missing durations.");
 }
 finally { Directory.Delete(temp, true); }
 Console.WriteLine("Core checks passed (LRC, YRC, TTML, ranking, lookup, preferences).");
@@ -82,13 +102,41 @@ sealed class FixtureHttp : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        if (request.RequestUri?.Host != "lrclib.net") throw new InvalidOperationException("Unexpected provider.");
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        var uri = request.RequestUri!;
+        string query = Uri.UnescapeDataString(uri.Query);
+        string body;
+        if (uri.Host == "lyricsplus.binimum.org" && query == "?title=Back Again&artist=Tides, Clouds&album=Evening")
+            body = """
+                {"metadata":{"title":"Back Again","artist":"Tides"},"lyrics":[
+                  {"time":1000,"text":"A line without duration"},
+                  {"time":5000,"duration":2000,"text":"Another line"}]}
+                """;
+        else if (uri.Host != "lrclib.net") throw new InvalidOperationException("Unexpected provider.");
+        else if (uri.AbsolutePath == "/api/get")
         {
-            Content = new StringContent("""
+            if (!query.Contains("duration=190")) throw new InvalidOperationException("Expected exact recording lookup.");
+            body = "{}";
+        }
+        else if (query == "?q=Back Again Tides")
+            body = JsonSerializer.Serialize(new[] { new
+            {
+                trackName = "Back Again", artistName = "Tides", duration = 190,
+                lyricsfile = """
+                    lines:
+                      - text: Back again
+                        start_ms: 1000
+                        end_ms: 4000
+                        words:
+                          - {text: Back, start_ms: 1000}
+                          - {text: again, start_ms: 2000}
+                    """
+            } });
+        else if (query == "?track_name=Back Again&artist_name=Tides, Clouds") body = "[]";
+        else
+            body = """
                 [{"trackName":"Under the stars","artistName":"Tides","duration":245,"syncedLyrics":"[00:02]Wrong duration"},
                  {"trackName":"Under the stars","artistName":"Tides","duration":191,"syncedLyrics":"[00:02]<00:02>Word <00:03>timing"}]
-                """)
-        });
+                """;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
     }
 }

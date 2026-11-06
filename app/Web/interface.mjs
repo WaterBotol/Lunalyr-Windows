@@ -424,7 +424,8 @@ function mountTray() {
   const line = element('strong', { class: 'tray-line' });
   const next = element('p', { class: 'caption tray-next' });
   setInterval(() => {
-    const cue = cueAt(state.lyrics.selected?.lines ?? [], position(state, performance.now()) - (state.lyrics.offset ?? 0));
+    const cue = cueAt(state.lyrics.selected?.lines ?? [], position(state, performance.now()) - (state.lyrics.offset ?? 0),
+      state.playback.track?.duration);
     line.textContent = cue.line?.text ?? state.lyrics.lookup ?? '';
     next.textContent = cue.next?.text ?? '';
   }, 180);

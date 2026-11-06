@@ -190,7 +190,7 @@ public static partial class LyricParser
     private static string? Attribute(XElement element, string name) =>
         element.Attributes().FirstOrDefault(attribute => attribute.Name.LocalName == name)?.Value;
 
-    private static Line[] FinalizeLines(List<Line> source, double duration)
+    internal static Line[] FinalizeLines(List<Line> source, double duration)
     {
         var rows = source.OrderBy(row => row.Start ?? double.PositiveInfinity).ToArray();
         var result = new List<Line>();

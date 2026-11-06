@@ -520,11 +520,12 @@ internal sealed class Controller : ApplicationContext
         controls.DisplayUpdater.MusicProperties.Artist = "Lunar Tides";
         controls.DisplayUpdater.Update();
         controls.PlaybackStatus = Windows.Media.MediaPlaybackStatus.Playing;
-        controls.UpdateTimelineProperties(new Windows.Media.SystemMediaTransportControlsTimelineProperties
+        var fixtureTimeline = new Windows.Media.SystemMediaTransportControlsTimelineProperties
         {
             StartTime = TimeSpan.Zero, MinSeekTime = TimeSpan.Zero,
             EndTime = TimeSpan.FromSeconds(45), MaxSeekTime = TimeSpan.FromSeconds(45), Position = TimeSpan.FromSeconds(5.6)
-        });
+        };
+        controls.UpdateTimelineProperties(fixtureTimeline);
 
         for (int i = 0; i < 24; i++)
         {
@@ -548,6 +549,18 @@ internal sealed class Controller : ApplicationContext
         if (desktop.Values.Any(entry => !entry.Surface.Ready)) throw new InvalidOperationException("Wallpaper WebView did not start.");
         await Task.Delay(1800);
         await settings.SavePreview(Path.Combine(smoke!, "settings.png"));
+        // The test session keeps reporting 5.6s. The clock must still reach the next cue.
+        double nextCue = candidates[0].Lines[1].Start!.Value;
+        for (int i = 0; i < 16; i++)
+        {
+            controls.UpdateTimelineProperties(fixtureTimeline);
+            await Task.Delay(250);
+            playback = await media.Read("");
+            SendAll("playback", new { playback, players = new[] { "Fixture" } });
+            if (playback.Playing && playback.Position >= nextCue + .25) break;
+        }
+        if (playback.Track?.Title != "Golden Hour Static" || !playback.Playing || playback.Position < nextCue + .25)
+            throw new InvalidOperationException("The Windows playback clock did not advance into the next lyric.");
         settings.Hide();
         await Task.Delay(650);
         var wallpaper = desktop.Values.First().Surface;
@@ -557,7 +570,7 @@ internal sealed class Controller : ApplicationContext
         using var graphics = Graphics.FromImage(screenshot);
         graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size);
         screenshot.Save(Path.Combine(smoke!, "desktop.png"), System.Drawing.Imaging.ImageFormat.Png);
-        Log("SMOKE OK: settings, wallpaper, fixture lyric timeline");
+        Log($"SMOKE OK: settings, wallpaper, playback advanced to {playback.Position:F2}s past the next lyric cue.");
         ExitThread();
     }
 

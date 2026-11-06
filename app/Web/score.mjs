@@ -15,9 +15,16 @@ export const arrivalFor = {
   editorial: 'fade', echo: 'lift', spoken: 'glide', cascade: 'lift', cutout: 'cutoutFold'
 };
 
-export function cueAt(lines, time) {
+export function cueAt(lines, time, duration = 0) {
   if (!lines.length) return {};
-  if (lines[0].start == null) return { line: lines[0], next: lines[1], index: 0, plain: true };
+  if (lines[0].start == null) {
+    const interval = duration > 0 ? duration / lines.length : 4;
+    const index = clamp(Math.floor(time / interval), 0, lines.length - 1);
+    const next = lines[index + 1];
+    const start = index * interval;
+    const end = (index + 1) * interval;
+    return { line: { ...lines[index], start, end }, next, index, plain: true };
+  }
   let left = 0;
   let right = lines.length;
   while (left < right) {
@@ -29,6 +36,14 @@ export function cueAt(lines, time) {
   const next = lines[left];
   if (!prior || time >= prior.end) return { next, gap: next ? next.start - time : undefined };
   return { line: prior, next, index: left - 1 };
+}
+
+export function lineOpacity(time, start, end, calm, hold = false) {
+  if (calm) return 1;
+  const span = Math.min(.24, (end - start) / 4);
+  if (span <= 0) return 1;
+  const incoming = smooth((time - start) / span);
+  return hold ? incoming : incoming * smooth((end - time) / span);
 }
 
 export function wordState(word, time, reveal, preview, lead) {

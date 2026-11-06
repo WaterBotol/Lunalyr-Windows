@@ -71,9 +71,9 @@ export function createGif(width, height, delay) {
 
 export async function lyricCard(state, time, palette = fallback) {
   const selected = state.lyrics?.selected;
-  const { line } = cueAt(selected?.lines ?? [], time);
-  if (!line) throw new Error('Play a song with lyrics to copy a lyric card.');
   const { track, artwork } = state.playback;
+  const { line } = cueAt(selected?.lines ?? [], time, track?.duration);
+  if (!line) throw new Error('Play a song with lyrics to copy a lyric card.');
   const w = 1080, h = 1350;
   const duration = Math.max(.8, Math.min(12, (line.end ?? time + 2) - (line.start ?? time)));
   const frames = Math.min(42, Math.ceil(duration / .12));

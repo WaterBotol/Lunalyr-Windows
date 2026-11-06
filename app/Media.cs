@@ -8,12 +8,9 @@ internal sealed class Media
 {
     private GlobalSystemMediaTransportControlsSessionManager? manager;
     private GlobalSystemMediaTransportControlsSession? session;
-    private string identity = "";
+    private Track? track;
     private string? artwork;
-    private double sampledPosition;
-    private long sampledAt;
-    private DateTimeOffset timelineStamp;
-    private bool wasPlaying;
+    private readonly PlaybackClock clock = new();
 
     public string[] Players { get; private set; } = [];
 
@@ -26,35 +23,28 @@ internal sealed class Media
             : manager.GetCurrentSession();
         if (preferred.Length == 0 && session?.GetPlaybackInfo().PlaybackStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
             session = sessions.FirstOrDefault(item => item.GetPlaybackInfo().PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) ?? session;
-        if (session is null) { identity = ""; return new Playback(); }
+        if (session is null) { track = null; return new Playback(); }
 
         var metadata = await session.TryGetMediaPropertiesAsync();
-        if (string.IsNullOrWhiteSpace(metadata.Title)) { identity = ""; return new Playback(); }
+        if (string.IsNullOrWhiteSpace(metadata.Title)) { track = null; return new Playback(); }
         var timeline = session.GetTimelineProperties();
         var info = session.GetPlaybackInfo();
-        var track = new Track(metadata.Title.Trim(), metadata.Artist.Trim(), metadata.AlbumTitle.Trim(),
-            Math.Clamp((timeline.EndTime - timeline.StartTime).TotalSeconds, 0, 86_400), session.SourceAppUserModelId);
+        string artist = string.IsNullOrWhiteSpace(metadata.Artist) ? metadata.AlbumArtist.Trim() : metadata.Artist.Trim();
+        var identity = new Track(metadata.Title.Trim(), artist, metadata.AlbumTitle.Trim(), 0, session.SourceAppUserModelId);
+        double duration = (timeline.EndTime - timeline.StartTime).TotalSeconds;
+        if (duration is <= 0 or > 86_400) duration = 0;
+        bool changed = track is null || (track with { Duration = 0 }) != identity;
         bool playing = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
-        bool changed = identity != track.Key;
-        if (changed)
-        {
-            identity = track.Key;
-            artwork = await Art(metadata);
-        }
-
-        long now = Environment.TickCount64;
-        if (changed || timeline.LastUpdatedTime != timelineStamp || playing != wasPlaying)
-        {
-            double offset = changed ? 0 : Math.Clamp((DateTimeOffset.UtcNow - timeline.LastUpdatedTime).TotalSeconds, 0, 3);
-            sampledPosition = Math.Max(0, (timeline.Position - timeline.StartTime).TotalSeconds + (playing ? offset : 0));
-            sampledAt = now;
-            timelineStamp = timeline.LastUpdatedTime;
-            wasPlaying = playing;
-        }
-        double position = sampledPosition + (playing ? (now - sampledAt) / 1000.0 * (info.PlaybackRate ?? 1) : 0);
-        if (track.Duration > 0) position = Math.Min(track.Duration, position);
-        return new Playback(track, position, playing, artwork, info.Controls.IsPreviousEnabled,
-            info.Controls.IsPlayPauseToggleEnabled, info.Controls.IsNextEnabled);
+        // Keep the recording and lyric lookup stable across incomplete timeline reports.
+        var currentTrack = !changed && track is { Duration: > 0 } known ? known : identity with { Duration = duration };
+        track = currentTrack;
+        double rate = PlaybackClock.Rate(info.PlaybackRate);
+        double position = clock.Update(changed, Math.Max(0, (timeline.Position - timeline.StartTime).TotalSeconds),
+            (DateTimeOffset.UtcNow - timeline.LastUpdatedTime).TotalSeconds, Environment.TickCount64, playing, rate);
+        if (changed) artwork = await Art(metadata);
+        if (currentTrack.Duration > 0) position = Math.Min(currentTrack.Duration, position);
+        return new Playback(currentTrack, position, playing, artwork, info.Controls.IsPreviousEnabled,
+            info.Controls.IsPlayPauseToggleEnabled, info.Controls.IsNextEnabled, rate);
     }
 
     public async Task Control(string action)

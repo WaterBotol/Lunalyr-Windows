@@ -1,4 +1,4 @@
-import { albumGrid, clamp, cueAt, fallback, hash, mix, noise, rgb, smooth, typography, wordState, arrivalFor } from './score.mjs';
+import { albumGrid, clamp, cueAt, fallback, hash, lineOpacity, mix, noise, rgb, smooth, typography, wordState, arrivalFor } from './score.mjs';
 import { field, lines, ribbons, starTrails, strata, tunnel } from './effects.mjs';
 import { GpuScene, effectNames } from './gpu.mjs';
 
@@ -29,7 +29,7 @@ export function font(p) { return fonts[p.font] ?? fonts.sans; }
 export function position(state, now) {
   const play = state.playback;
   if (!play) return 0;
-  const value = (play.position ?? 0) + (play.playing ? Math.max(0, now - state.syncedAt) / 1000 : 0);
+  const value = (play.position ?? 0) + (play.playing ? Math.max(0, now - state.syncedAt) / 1000 * (play.rate ?? 1) : 0);
   return play.track?.duration > 0 ? clamp(value, 0, play.track.duration) : Math.max(0, value);
 }
 
@@ -143,7 +143,7 @@ export class Stage {
     const time = (track === demo.track ? now / 1000 % 16 : position(this.state, now)) - (this.state.lyrics?.offset ?? 0);
     if (p.lyricsVisible) paintLyrics(draw, w, h, selected, time, track, {
       ...p, calm, searching: this.state.lyrics?.lookup === 'Looking for lyrics…'
-    }, palette, this.elapsed, audio, this.preview);
+    }, palette, this.elapsed, audio);
     if (p.darkening !== 1) {
       draw.globalCompositeOperation = 'destination-over';
       draw.fillStyle = p.darkening > 1 ? `rgb(0 0 0 / ${clamp((p.darkening - 1) * .45)})` : `rgb(255 255 255 / ${clamp((1 - p.darkening) * .1)})`;
@@ -250,12 +250,12 @@ function wrap(context, value, size, p, width) {
   return rows;
 }
 
-export function paintLyrics(context, w, h, selected, time, track, p, palette, clock, audio, preview = false) {
+export function paintLyrics(context, w, h, selected, time, track, p, palette, clock, audio) {
   const scale = Math.min(w / 860, h / 560);
   const base = clamp(66 * scale * p.lyricSize, 12, Math.min(w / 6, h / 3.2));
   const maxWidth = w * .88;
   const theme = typography(p, palette, clock, audio);
-  const { line, next, gap, plain } = cueAt(selected?.lines ?? [], time);
+  const { line, next, gap, plain } = cueAt(selected?.lines ?? [], time, track?.duration);
   if (!line) {
     if (p.interludes && p.background !== 'desktop' && gap > 1.5) {
       const small = Math.max(11, base * .38);
@@ -278,11 +278,21 @@ export function paintLyrics(context, w, h, selected, time, track, p, palette, cl
   const previewNext = p.nextWords?.[key] ?? true;
   const displayed = p.reading === 'replace' && line.reading ? line.reading : line.text;
   const words = displayed === line.text ? line.words : [];
+  const age = Math.max(0, time - line.start);
+  const end = Math.min(line.end, next?.start ?? Infinity);
+  context.save();
+  context.globalAlpha *= lineOpacity(Math.max(line.start, time), line.start, end, p.calm, plain && !next);
   if (!words.length) {
     const size = Math.min(base, Math.max(base * .63, base * maxWidth / Math.max(1, measure(context, displayed, base, p))));
     const rows = wrap(context, displayed, size, p, maxWidth).slice(0, 6);
-    rows.forEach((row, index) => text(context, row, w / 2, h * .48 + (index - (rows.length - 1) / 2) * size * 1.16, size, p,
+    const [dx, dy, zoom, rotation] = enter(arrival, age, size, hash(line.text), p.calm);
+    context.save();
+    context.translate(w / 2 + dx, h * .48 + dy);
+    context.rotate(rotation);
+    context.scale(zoom, zoom);
+    rows.forEach((row, index) => text(context, row, 0, (index - (rows.length - 1) / 2) * size * 1.16, size, p,
       rgb(theme.end, plain ? .83 : 1), style === 'editorial', p.scrim));
+    context.restore();
   } else {
     let visible = words.map((word, i) => ({ ...word, i, ...wordState(word, time, reveal, previewNext, p.previewLead) }));
     let sung = visible.findLastIndex(word => word.phase === 'held' || word.phase === 'sung');
@@ -326,13 +336,14 @@ export function paintLyrics(context, w, h, selected, time, track, p, palette, cl
         context.beginPath(); context.moveTo(x0, y0); context.lineTo(x1, y1); context.stroke();
       }
     }
-    if (style === 'echo') {
+    const echo = style === 'echo' && (reveal ? words.slice(0, sung + 1).map(word => word.text).join(' ') : line.text);
+    if (echo) {
       for (let copy = 0; copy < 7; copy++) {
         context.save();
         context.translate(w * (.12 + noise(seed + copy) * .76), h * (.14 + noise(seed + copy * 31) * .67));
         context.rotate(copy % 2 ? Math.PI : 0);
-        const echoSize = Math.min(base * (.34 + noise(seed + copy * 89) * .26), base * maxWidth / Math.max(1, measure(context, line.text, base, p)));
-        text(context, line.text, 0, 0, echoSize, p, rgb(theme.end, .16), copy % 3 === 0);
+        const echoSize = Math.min(base * (.34 + noise(seed + copy * 89) * .26), base * maxWidth / Math.max(1, measure(context, echo, base, p)));
+        text(context, echo, 0, 0, echoSize, p, rgb(theme.end, .16), copy % 3 === 0);
         context.restore();
       }
     }
@@ -365,8 +376,9 @@ export function paintLyrics(context, w, h, selected, time, track, p, palette, cl
   if (p.reading === 'below' && line.reading) {
     const size = Math.max(11, Math.min(base * .38, base * maxWidth / Math.max(1, measure(context, line.reading, base, p))));
     text(context, line.reading, w / 2, h * .72, size, p, rgb(theme.end, .76), false, p.scrim);
-  } else if (next && (!words.length || preview)) {
+  } else if (next && plain) {
     const size = Math.min(base * .68, base * maxWidth / Math.max(1, measure(context, next.text, base, p)));
     text(context, next.text, w / 2, h * .65, size, p, rgb(theme.end, .37), false, p.scrim);
   }
+  context.restore();
 }
