@@ -108,7 +108,6 @@ export function strata(context, w, h, palette, t, audio, p, style) {
 }
 
 const stars = Array.from({ length: 1900 }, (_, i) => [noise(i * 9), noise(i * 9 + 1), noise(i * 9 + 2)]);
-const planeColours = [[253, 122, 253], [225, 254, 122]];
 export function starTrails(context, w, h, palette, t, audio, p) {
   context.fillStyle = '#03040b';
   context.fillRect(0, 0, w, h);
@@ -131,7 +130,7 @@ export function starTrails(context, w, h, palette, t, audio, p) {
   for (let j = 0; j < 2; j++) {
     const x = (.50 - j * .08 + Math.sin(t * .23 + j * 1.7) * .09) * w;
     const y = (.43 + j * .14 + Math.sin(t * .19 + j * 1.5) * .08) * h;
-    const colour = planeColours[j];
+    const colour = mix(vivid(palette[j ? 6 : 2], 1.8), j ? [90, 190, 141] : [219, 101, 170], .42);
     const trail = context.createLinearGradient(x, y, 0, h);
     trail.addColorStop(0, rgb(colour, .88));
     trail.addColorStop(1, rgb(colour, .12));
