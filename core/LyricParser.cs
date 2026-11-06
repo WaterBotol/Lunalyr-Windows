@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
@@ -21,6 +22,8 @@ public static partial class LyricParser
     private static partial Regex Space();
     [GeneratedRegex(@"^\[([a-z]+)\s*:\s*(.*?)\]", RegexOptions.IgnoreCase)]
     private static partial Regex Tag();
+    [GeneratedRegex(@"^\s*[（(][^）)]*[）)]\s+|\s+[（(][^）)]*[）)]\s*$")]
+    private static partial Regex ParentheticalVoice();
 
     private static double Number(string? value) =>
         double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) && double.IsFinite(number)
@@ -204,6 +207,7 @@ public static partial class LyricParser
             if (!line.Start.HasValue) { result.Add(line); continue; }
             double start = line.Start.Value;
             double? next = nextStarts[i];
+            bool inferredEnd = !(line.End > start) && next.HasValue;
             double end = line.End > start ? line.End.Value : next ?? (duration > start ? duration : start + 5);
             Word[] words = line.Words.Where(word => word.Start >= start - .25 && word.Start < end)
                 .OrderBy(word => word.Start).ToArray();
@@ -213,14 +217,73 @@ public static partial class LyricParser
                 double wordEnd = word.End > word.Start ? word.End : w + 1 < words.Length ? words[w + 1].Start : end;
                 words[w] = word with { End = Math.Clamp(wordEnd, word.Start, end) };
             }
+            var current = line with { End = end, Words = words, EndFromNextLine = inferredEnd || line.EndFromNextLine };
             if (result.LastOrDefault()?.Start == line.Start)
             {
                 Line previous = result[^1];
-                if (previous.Text == line.Text || previous.Reading is not null) continue;
-                result[^1] = previous with { Reading = line.Text };
+                if (previous.Words.Length == 0 && words.Length > 0 && TimingKey(previous.Text) == TimingKey(line.Text))
+                    result[^1] = current with { Reading = current.Reading ?? previous.Reading };
+                else if (previous.Text != line.Text && previous.Reading is null)
+                    result[^1] = previous with { Reading = line.Text };
             }
-            else result.Add(line with { End = end, Words = words });
+            else result.Add(current);
+        }
+        return RemoveMixedTimingCopies(result);
+    }
+
+    private static Line[] RemoveMixedTimingCopies(List<Line> lines)
+    {
+        if (!lines.Any(line => line.Words.Length > 0) || !lines.Any(line => line.Words.Length == 0)) return lines.ToArray();
+        var removed = new HashSet<int>();
+        for (int i = 0; i < lines.Count; i++)
+        {
+            Line timed = lines[i];
+            if (timed.Start is not { } start || timed.Words.Length == 0) continue;
+            string key = TimingKey(timed.Text);
+            string main = TimingKey(ParentheticalVoice().Replace(timed.Text, ""));
+            double vocalEnd = timed.Words.Max(word => word.End);
+            int duplicate = -1;
+            double distance = double.PositiveInfinity;
+            foreach (int j in new[] { i - 1, i + 1 })
+            {
+                if (j < 0 || j >= lines.Count || removed.Contains(j)) continue;
+                Line fallback = lines[j];
+                if (fallback.Start is not { } a || fallback.End is not { } b || fallback.Words.Length != 0) continue;
+                string other = TimingKey(fallback.Text);
+                if (other != key && other != main) continue;
+                double difference = Math.Abs(a - start);
+                bool multiple = Space().IsMatch(fallback.Text) || fallback.Text.EnumerateRunes().Count() > 1
+                    && fallback.Text.Any(character => character is >= '\u3040' and <= '\u30ff' or >= '\u3400' and <= '\u9fff');
+                if (difference < distance && LyricRules.MixedTimingCopy(a, b, fallback.EndFromNextLine ? 1 : 0,
+                    multiple ? 1 : 0, start, vocalEnd) != 0)
+                {
+                    distance = difference;
+                    duplicate = j;
+                }
+            }
+            if (duplicate < 0) continue;
+            removed.Add(duplicate);
+            if (timed.Reading is null) lines[i] = timed with { Reading = lines[duplicate].Reading };
+        }
+        if (removed.Count == 0) return lines.ToArray();
+        var result = new List<Line>(lines.Count - removed.Count);
+        int prior = -1;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (removed.Contains(i)) continue;
+            if (prior >= 0 && i > prior + 1 && lines[prior].EndFromNextLine && lines[i].Start is { } next
+                && Math.Abs(lines[prior].End!.Value - lines[prior + 1].Start!.Value) < .05)
+                result[^1] = lines[prior] with { End = next };
+            result.Add(lines[i]);
+            prior = i;
         }
         return result.ToArray();
+    }
+
+    private static string TimingKey(string value)
+    {
+        string key = string.Concat(value.Normalize(NormalizationForm.FormKC).ToLowerInvariant()
+            .EnumerateRunes().Where(Rune.IsLetterOrDigit).Select(rune => rune.ToString()));
+        return key.Length > 0 ? key : value;
     }
 }

@@ -1,4 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
   <ItemGroup><PackageReference Include="YamlDotNet" Version="18.1.0" /></ItemGroup>
+  <PropertyGroup>
+    <LyricRulesSource>$(MSBuildThisFileDirectory)../shared/LyricRules</LyricRulesSource>
+    <LyricRulesName Condition="$([MSBuild]::IsOSPlatform('Windows'))">lunalyr_lyric_rules.dll</LyricRulesName>
+    <LyricRulesName Condition="$([MSBuild]::IsOSPlatform('OSX'))">liblunalyr_lyric_rules.dylib</LyricRulesName>
+    <LyricRulesName Condition="'$(LyricRulesName)' == ''">liblunalyr_lyric_rules.so</LyricRulesName>
+    <LyricRulesDirectory>$(BaseIntermediateOutputPath)lyric-rules/$(Configuration)/$(RuntimeIdentifier)</LyricRulesDirectory>
+    <LyricRulesBinary>$(LyricRulesDirectory)/$(LyricRulesName)</LyricRulesBinary>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(LyricRulesBinary)" Link="$(LyricRulesName)"
+      CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="BuildLyricRules" BeforeTargets="PrepareForBuild"
+    Inputs="$(LyricRulesSource)/LyricRules.c;$(LyricRulesSource)/LyricRules.h;$(MSBuildProjectFullPath)" Outputs="$(LyricRulesBinary)">
+    <MakeDir Directories="$(LyricRulesDirectory)" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+      Command="clang -std=c11 -O2 -shared -fms-runtime-lib=static -DLUNALYR_LYRIC_RULES_DLL &quot;$(LyricRulesSource)/LyricRules.c&quot; -o &quot;$(LyricRulesBinary)&quot;" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('OSX'))"
+      Command="clang -std=c11 -O2 -dynamiclib &quot;$(LyricRulesSource)/LyricRules.c&quot; -o &quot;$(LyricRulesBinary)&quot;" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Linux'))"
+      Command="clang -std=c11 -O2 -shared -fPIC &quot;$(LyricRulesSource)/LyricRules.c&quot; -lm -o &quot;$(LyricRulesBinary)&quot;" />
+  </Target>
 </Project>

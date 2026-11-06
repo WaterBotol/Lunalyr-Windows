@@ -13,6 +13,27 @@ static void Assert(bool condition, string message)
     if (!condition) throw new Exception(message);
 }
 
+using (var shared = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "SharedLyricFixtures.json"))))
+{
+    var recording = new Track("Rain Again", "Lunar Tides", "", 180, "fixture");
+    foreach (var candidate in shared.RootElement.GetProperty("recordings").EnumerateArray())
+    {
+        string title = candidate.GetProperty("title").GetString()!;
+        string artist = candidate.GetProperty("artist").GetString()!;
+        double duration = candidate.GetProperty("duration").GetDouble();
+        Assert(LyricLookup.Match(recording, title, artist, duration) == candidate.GetProperty("match").GetBoolean(),
+            $"Shared recording fixture: {title}, {artist}, {duration}s.");
+    }
+    foreach (var fixture in shared.RootElement.GetProperty("timelines").EnumerateArray())
+    {
+        var lines = LyricParser.Lrc(fixture.GetProperty("lrc").GetString()!, 12);
+        Assert(lines.Select(line => line.Start).SequenceEqual(fixture.GetProperty("starts").EnumerateArray().Select(value => (double?)value.GetDouble()))
+            && lines.Select(line => line.Words.Length > 0).SequenceEqual(fixture.GetProperty("wordTimed").EnumerateArray().Select(value => value.GetBoolean()))
+            && lines[0].End == fixture.GetProperty("firstEnd").GetDouble(),
+            $"Shared timing fixture: {fixture.GetProperty("name").GetString()}.");
+    }
+}
+
 var mixed = LyricParser.Lrc("""
     [offset:100]
     [00:01.00]<00:01.00>First <00:01.50>words

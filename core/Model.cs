@@ -12,7 +12,10 @@ public sealed record Track(string Title, string Artist, string Album, double Dur
 public sealed record Playback(Track? Track = null, double Position = 0, bool Playing = false,
     string? Artwork = null, bool CanPrevious = false, bool CanPlay = false, bool CanNext = false, double Rate = 1);
 public sealed record Word(string Text, double Start, double End);
-public sealed record Line(string Text, double? Start, double? End, Word[] Words, string? Reading = null);
+public sealed record Line(string Text, double? Start, double? End, Word[] Words, string? Reading = null)
+{
+    internal bool EndFromNextLine { get; init; }
+}
 public sealed record Lyrics(string Source, Line[] Lines, bool Instrumental = false)
 {
     public int Quality => Lines.Any(line => line.Words.Length > 0)

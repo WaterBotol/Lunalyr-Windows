@@ -1,0 +1,33 @@
+{
+  "recordings": [
+    { "title": "Rain Again (feat. Clouds)", "artist": "Lunar Tides", "duration": 180, "match": true },
+    { "title": "Rain Again", "artist": "Lunar Tides", "duration": 183, "match": true },
+    { "title": "Rain Again", "artist": "Lunar Tides", "duration": 0, "match": true },
+    { "title": "Rain Again", "artist": "Lunar Tides", "duration": 186, "match": false },
+    { "title": "Rain Again", "artist": "Other Band", "duration": 180, "match": false },
+    { "title": "On the Coast", "artist": "Lunar Tides", "duration": 180, "match": false }
+  ],
+  "timelines": [
+    {
+      "name": "Line-only copy just before a word-timed cue",
+      "lrc": "[00:01]An earlier line\n[00:03.50]Hold on\n[00:04]<00:04>Hold <00:05>on<00:06>\n[00:08]A later line",
+      "starts": [1, 4, 8],
+      "wordTimed": [false, true, false],
+      "firstEnd": 4
+    },
+    {
+      "name": "A genuine repeated line stays at its own cue",
+      "lrc": "[00:01]Hold on\n[00:04]<00:04>Hold <00:05>on<00:06>",
+      "starts": [1, 4],
+      "wordTimed": [false, true],
+      "firstEnd": 4
+    },
+    {
+      "name": "Equal timestamps prefer native word timing",
+      "lrc": "[00:01]Hold on\n[00:01]<00:01>Hold <00:02>on<00:03>\n[00:04]Another line",
+      "starts": [1, 4],
+      "wordTimed": [true, false],
+      "firstEnd": 4
+    }
+  ]
+}

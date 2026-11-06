@@ -369,11 +369,11 @@ public sealed class LyricLookup(HttpClient http)
     {
         string expected = Normalize(LookupTitle(track.Title, track.Artist));
         string candidate = Normalize(LookupTitle(title, artist));
-        if (expected.Length == 0 || candidate != expected) return false;
         string expectedArtist = Normalize(track.Artist), candidateArtist = Normalize(artist);
-        if (expectedArtist.Length > 0 && candidateArtist.Length > 0 && expectedArtist != candidateArtist
-            && !ArtistParts(track.Artist).Intersect(ArtistParts(artist)).Any()) return false;
-        return duration <= 0 || track.Duration <= 0 || Math.Abs(duration - track.Duration) <= Math.Clamp(track.Duration * .04, 5, 12);
+        bool compareArtist = expectedArtist.Length > 0 && candidateArtist.Length > 0;
+        bool artistMatches = expectedArtist == candidateArtist || compareArtist && ArtistParts(track.Artist).Intersect(ArtistParts(artist)).Any();
+        return LyricRules.RecordingMatch(expected.Length > 0 && expected == candidate ? 1 : 0, artistMatches ? 1 : 0,
+            compareArtist ? 1 : 0, 0, 1, track.Duration, duration) == 0;
     }
 
     private static string LookupTitle(string value, string artist)
